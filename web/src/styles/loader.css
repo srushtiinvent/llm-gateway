@@ -1,0 +1,36 @@
+/* Loading screen in the Gateway palette (uses the theme variables) */
+.loading-screen{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;background:var(--bg);color:var(--tx);overflow:hidden;transition:opacity 450ms ease,visibility 450ms ease}
+.loading-screen.is-leaving{opacity:0;visibility:hidden}
+.loader-radar{position:absolute;inset:0;z-index:1;opacity:.95}
+.loader-radar:empty{background:radial-gradient(circle at 50% 50%,transparent 30%,var(--line) 30.3%,transparent 30.8%,transparent 55%,var(--line) 55.3%,transparent 55.8%)}
+.loader-content{position:absolute;left:50%;top:50%;width:min(210px,62vw);aspect-ratio:1;transform:translate(-50%,-50%);z-index:2;display:grid;align-content:center;justify-content:center;grid-template-columns:minmax(0,164px);justify-items:center;gap:6px;text-align:center;padding:0;border-radius:50%;
+ background:radial-gradient(circle at 30% 20%,rgba(255,255,255,.30),rgba(255,255,255,.06) 38%,transparent 60%),radial-gradient(circle at 70% 85%,color-mix(in srgb,var(--acc) 22%,transparent),transparent 55%),color-mix(in srgb,var(--bg) 52%,transparent);
+ backdrop-filter:blur(12px) saturate(1.5);-webkit-backdrop-filter:blur(12px) saturate(1.5);border:1px solid rgba(255,255,255,.28);
+ box-shadow:inset 0 3px 3px rgba(255,255,255,.4),inset 0 -22px 34px rgba(0,0,0,.28),inset 0 0 40px color-mix(in srgb,var(--acc) 14%,transparent),0 24px 60px var(--sh),0 0 50px var(--glow);animation:orbfloat 5s ease-in-out infinite}
+.loader-content:before{content:"";position:absolute;left:16%;top:7%;width:44%;height:20%;border-radius:50%;background:linear-gradient(180deg,rgba(255,255,255,.55),rgba(255,255,255,0));filter:blur(1px);transform:rotate(-16deg);pointer-events:none}
+.loader-content:after{content:"";position:absolute;inset:-1px;border-radius:50%;pointer-events:none;background:conic-gradient(from 0deg,transparent,color-mix(in srgb,var(--acc) 55%,transparent),transparent 30%);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));animation:spin 6s linear infinite}
+@keyframes orbfloat{50%{transform:translate(-50%,calc(-50% - 7px))}}
+.loading-screen{--ext:#7d3a5a}
+[data-theme="light"] .loading-screen{--ext:#F0B1CE}
+[data-theme="light"] .loader-content{background:radial-gradient(circle at 30% 20%,rgba(255,255,255,.9),rgba(255,255,255,.35) 40%,transparent 62%),radial-gradient(circle at 70% 85%,color-mix(in srgb,var(--acc) 16%,transparent),transparent 55%),color-mix(in srgb,#fff 40%,transparent);border-color:rgba(255,255,255,.9);box-shadow:inset 0 3px 3px #fff,inset 0 -22px 34px rgba(16,48,47,.12),inset 0 0 40px color-mix(in srgb,var(--acc) 10%,transparent),0 24px 50px var(--sh),0 0 40px var(--glow)}
+.loader-logo{width:30px;height:30px;filter:drop-shadow(0 0 18px var(--glow));animation:bob 2.4s ease-in-out infinite}
+@keyframes bob{50%{transform:translateY(-4px)}}
+.loader-label{margin:0;font:700 7.5px var(--mono);letter-spacing:.24em;color:var(--acc)}
+.loading-screen h1{margin:0;font-family:"Press Start 2P",ui-monospace,Menlo,monospace;font-weight:400;font-size:clamp(9px,3.1vw,12.5px);line-height:1.5;letter-spacing:0;color:var(--tx);min-height:1.5em}
+.loader-status{margin:0;font:600 8px var(--mono);letter-spacing:.1em;color:var(--mut)}
+.loader-track{width:min(140px,44vw);height:4px;border-radius:99px;background:var(--panel2);border:1px solid var(--line);overflow:hidden}
+.loader-track span{display:block;height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,var(--gem),var(--acc),var(--grq));animation:loader-progress 4.8s cubic-bezier(.5,0,.2,1) forwards}
+@keyframes loader-progress{to{width:100%}}
+/* Shuffle text (slide effect) */
+.shuffle-parent{display:inline-block;white-space:normal;line-height:1.5;text-transform:uppercase;visibility:hidden}.shuffle-parent.is-ready{visibility:visible}
+.shuffle-char-wrapper{display:inline-block;overflow:hidden;vertical-align:bottom;position:relative;line-height:1.5;height:1.5em}
+.shuffle-char-wrapper>span{display:inline-flex;will-change:transform}
+.shuffle-char{display:inline-block;text-align:center;line-height:1.5}
+@media (prefers-reduced-motion:reduce){.loader-logo{animation:none}.loader-track span{animation:none;width:100%}}
+
+/* 3D extruded title */
+.loading-screen h1{perspective:600px;transform-style:preserve-3d}
+.loading-screen h1 .shuffle-char{color:var(--tx);text-shadow:1px 1px 0 var(--ext),2px 2px 0 var(--ext),3px 3px 0 var(--ext),4px 4px 6px rgba(0,0,0,.4)}
+[data-theme="light"] .loading-screen h1 .shuffle-char{text-shadow:1px 1px 0 var(--ext),2px 2px 0 var(--ext),3px 3px 0 var(--ext),4px 4px 0 var(--ext),5px 5px 6px rgba(214,39,127,.18)}
+.loading-screen h1.settled .shuffle-char-wrapper{overflow:visible}
+.loading-screen h1.settled{transition:transform .2s ease-out}

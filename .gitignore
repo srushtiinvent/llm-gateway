@@ -1,0 +1,18 @@
+# secrets: never commit these
+.env
+.env.*
+!.env.example
+
+# build output
+/gateway
+/loadtest
+/bin/
+*.exe
+
+# misc
+.DS_Store
+*.log
+loadtest-result*.json
+
+node_modules/
+web/dist/

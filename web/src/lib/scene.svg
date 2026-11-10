@@ -1,0 +1,52 @@
+<svg id="scene" viewBox="0 0 900 440" aria-label="Request flow: your app, gateway, providers">
+        <g id="sky">
+          <circle class="moon" cx="840" cy="48" r="16"/><circle cx="848" cy="43" r="14" fill="var(--panel)" opacity="var(--sky-a)"/>
+          <circle class="sun" cx="840" cy="48" r="18"/>
+          <g id="stars"></g>
+          <g><path class="cloud" d="M0 70h90a18 18 0 0 0-9-30 22 22 0 0 0-40-5 18 18 0 0 0-41 35z" style="animation-delay:-6s"/><path class="cloud" d="M0 120h70a14 14 0 0 0-7-24 17 17 0 0 0-31-4 14 14 0 0 0-32 28z" style="animation-delay:-22s"/></g>
+        </g>
+        <line class="runway" x1="0" y1="418" x2="900" y2="418"/>
+        <!-- lanes -->
+        <g class="rvs sv"><path id="laneA" class="lane" d="M175 225 H392"/></g>
+        <g class="rvs sv"><path id="laneG" class="lane" d="M506 205 C590 205 600 112 700 112"/></g>
+        <g class="rvs sv"><path id="laneQ" class="lane" d="M506 245 C590 245 600 338 700 338"/></g>
+        <!-- gate -->
+        <g class="rvs sv">
+          <rect x="40" y="168" width="135" height="116" rx="18" fill="var(--panel2)" stroke="var(--mut)" stroke-width="2"/>
+          <rect x="62" y="188" width="90" height="48" rx="13" fill="none" stroke="var(--acc)" stroke-width="3"/>
+          <path d="M80 236 L74 252 L96 236" fill="none" stroke="var(--acc)" stroke-width="3" stroke-linejoin="round"/>
+          <circle cx="85" cy="212" r="4" fill="var(--acc)"/><circle cx="107" cy="212" r="4" fill="var(--acc)"/><circle cx="129" cy="212" r="4" fill="var(--acc)"/>
+          <text x="107" y="272" text-anchor="middle" fill="var(--tx)" style="font:800 12px var(--sans);letter-spacing:.14em">YOUR APP</text>
+        </g>
+        <!-- hub -->
+        <g id="hub" class="rvs sv">
+          <circle cx="450" cy="225" r="104" fill="none" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="3 8"/>
+          <circle cx="450" cy="225" r="76" fill="none" stroke="var(--line)" stroke-width="1.5"/>
+          <circle class="ping" cx="450" cy="225" r="60"/><circle class="ping p2" cx="450" cy="225" r="60"/>
+          <g class="sweep"><path d="M450 225 L450 149 A76 76 0 0 1 516 187 Z" fill="var(--acc)" opacity=".28"/><line x1="450" y1="225" x2="450" y2="149" stroke="var(--acc)" stroke-width="2.5"/></g>
+          <circle id="hubcore" class="hubcore" cx="450" cy="225" r="46" fill="var(--panel2)" stroke="var(--acc)" stroke-width="3"/>
+          <path d="M433 238a24 24 0 0 1 0-26M467 212a24 24 0 0 1 0 26M424 247a38 38 0 0 1 0-44M476 203a38 38 0 0 1 0 44" fill="none" stroke="var(--acc)" stroke-width="3.4" stroke-linecap="round"/>
+          <circle cx="450" cy="225" r="5" fill="var(--acc)"/>
+          <text x="450" y="318" text-anchor="middle" fill="var(--tx)" style="font:800 12px var(--sans);letter-spacing:.2em">GATEWAY</text>
+        </g>
+        <!-- hangars -->
+        <g class="rvs sv"><g class="hangar live" id="hG">
+          <g class="smoke"><circle cx="760" cy="62" r="7"/><circle cx="780" cy="62" r="6"/><circle cx="740" cy="62" r="5"/></g>
+          <path class="body" d="M700 148 V92 Q700 66 785 66 Q870 66 870 92 V148 Z"/>
+          <rect class="haz" x="700" y="130" width="170" height="18" fill="url(#hz)"/>
+          <text class="lbl" x="785" y="106" text-anchor="middle">GEMINI</text>
+          <text class="sub" id="gSub" x="785" y="124" text-anchor="middle">CLEARED · FUEL 72%</text>
+          <text class="stamp" x="785" y="172" text-anchor="middle">GROUNDED</text>
+        </g></g>
+        <g class="rvs sv"><g class="hangar live" id="hQ">
+          <g class="smoke"><circle cx="760" cy="288" r="7"/><circle cx="780" cy="288" r="6"/><circle cx="740" cy="288" r="5"/></g>
+          <path class="body" d="M700 374 V318 Q700 292 785 292 Q870 292 870 318 V374 Z"/>
+          <rect class="haz" x="700" y="356" width="170" height="18" fill="url(#hz)"/>
+          <text class="lbl" x="785" y="332" text-anchor="middle">GROQ</text>
+          <text class="sub" id="qSub" x="785" y="350" text-anchor="middle">CLEARED · FUEL 94%</text>
+          <text class="stamp" x="785" y="398" text-anchor="middle">GROUNDED</text>
+        </g></g>
+        <defs><pattern id="hz" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="7" height="14" fill="var(--bad)"/><rect x="7" width="7" height="14" fill="transparent"/></pattern></defs>
+        <g class="fx" id="fx"></g>
+        <g class="plane" id="plane" opacity="0"><path d="M0,-11 L4,-3 L15,3 L15,6 L4,4 L3,10 L7,12 L7,14 L0,13 L-7,14 L-7,12 L-3,10 L-4,4 L-15,6 L-15,3 L-4,-3 Z" transform="rotate(90) scale(1.25)"/></g>
+      </svg>
