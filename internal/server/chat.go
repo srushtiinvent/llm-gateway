@@ -112,6 +112,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// quota, so they are not counted against the site's daily budget (the per-minute limit still applies).
 	byokKeys := s.parseByok(r)
 	byok := len(byokKeys) > 0
+	if s.Config.RequireOwnKeys && !byok && strings.HasPrefix(key.Name, visitorKeyPrefix) {
+		writeError(w, http.StatusForbidden, "invalid_request_error", "own_keys_required",
+			"This site does not spend its own provider quota on visitors. Add your own free Gemini or Groq key on the Keys page, then try again.", 0, nil)
+		return
+	}
 	rpm := key.RPMLimit
 	if byok && s.Config.ByokRPM > 0 && (rpm == 0 || rpm < s.Config.ByokRPM) {
 		rpm = s.Config.ByokRPM
@@ -172,6 +177,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// (answers from the cache are free and keep working even when the budget is used up).
 	if !byok && !s.Budget.Allow(ctx, key) {
 		lg.Status, lg.Error = "error", "daily_budget_exceeded"
+		if strings.HasPrefix(key.Name, visitorKeyPrefix) {
+			writeError(w, http.StatusTooManyRequests, "rate_limit_error", "free_flights_used",
+				"You have used your free flights on this site's keys. Add your own free Gemini or Groq key on the Keys page to keep going. Repeated questions from the cache are still free.",
+				untilUTCMidnight(), nil)
+			return
+		}
 		writeError(w, http.StatusTooManyRequests, "rate_limit_error", "daily_budget_exceeded",
 			fmt.Sprintf("This key has used its daily budget (%d requests that reached a provider). It resets at 00:00 UTC. Repeated questions answered from the cache are free.", key.DailyLimit),
 			untilUTCMidnight(), nil)

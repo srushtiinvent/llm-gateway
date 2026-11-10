@@ -73,6 +73,8 @@ func (g *signupGuard) allow(ip string, perIP, global int) (ok bool, reason strin
 	return true, ""
 }
 
+const visitorKeyPrefix = "visitor-"
+
 // POST /v1/signup  -> a personal free key with small limits. No admin token needed.
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	c := s.Config
@@ -90,7 +92,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	b := make([]byte, 3)
 	_, _ = rand.Read(b)
-	name := "visitor-" + hex.EncodeToString(b)
+	name := visitorKeyPrefix + hex.EncodeToString(b)
 	plain, prefix, hash := auth.GenerateKey()
 	k, err := s.Store.CreateKey(r.Context(), name, prefix, hash, c.PublicKeyRPM, c.PublicKeyDaily)
 	if err != nil {
@@ -170,7 +172,7 @@ func (s *Server) handlePublicStats(w http.ResponseWriter, r *http.Request) {
 		"window": o.Window, "bucket_sec": o.BucketSec, "uptime_sec": o.UptimeSec,
 		"stats": o.Stats, "cache_hit_rate": o.HitRate, "cost": o.Cost,
 		"providers": provs, "recent": recent,
-		"signup": map[string]any{"enabled": c.PublicSignup, "rpm_limit": c.PublicKeyRPM, "daily_limit": c.PublicKeyDaily},
+		"signup": map[string]any{"enabled": c.PublicSignup, "rpm_limit": c.PublicKeyRPM, "daily_limit": c.PublicKeyDaily, "require_own_keys": c.RequireOwnKeys},
 	}
 	b, _ := json.Marshal(out)
 	publicCache.Lock()

@@ -161,7 +161,7 @@ export default function Keys() {
 
       {live && names.length > 0 && (
         <div className="card pad rv" style={{ marginTop: 16 }}>
-          <div className="ttl"><span>CONNECT YOUR OWN PROVIDER KEYS</span><span className={`chip ${gw.usingOwn ? 'ok' : ''}`}>{gw.usingOwn ? 'IN USE' : 'OPTIONAL'}</span></div>
+          <div className="ttl"><span>CONNECT YOUR OWN PROVIDER KEYS</span><span className={`chip ${gw.usingOwn ? 'ok' : ''}`}>{gw.usingOwn ? 'IN USE' : gw.requireOwn ? 'REQUIRED TO FLY' : 'OPTIONAL'}</span></div>
           <div className="mut" style={{ font: '600 12.5px/1.6 var(--sans)', marginBottom: 12 }}>
             Use your own free Gemini, Groq or OpenRouter keys and your flights run on <b>your</b> provider quota, not the site's. Your keys stay in this browser and are sent only with your own requests. The gateway uses them for that one request and never stores or logs them.
           </div>

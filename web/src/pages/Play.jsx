@@ -101,9 +101,9 @@ export default function Play() {
       S.hidePlane();
       gw.failedChat(error.tried || []);
       term.current?.log(`${clock()}  POST /v1/chat/completions  ${error.status || 'error'} ${error.message}`.slice(0, 110), 'er');
-      const limited = error.status === 429 && !(error.tried || []).length;
-      const who = error.code === 'signup_limit' ? 'NO MORE FREE KEYS TODAY' : limited ? 'YOU HIT YOUR LIMIT' : error.status === 401 ? 'KEY PROBLEM' : 'NO PROVIDER COULD ANSWER';
-      const tag = error.code === 'signup_limit' ? 'TRY TOMORROW' : limited ? 'SLOW DOWN' : error.status === 401 ? 'TRY AGAIN' : 'ALL GROUNDED';
+      const limited = error.status === 429 && !(error.tried || []).length && !['free_flights_used'].includes(error.code);
+      const who = ['own_keys_required', 'free_flights_used'].includes(error.code) ? 'ADD YOUR OWN KEY' : error.code === 'signup_limit' ? 'NO MORE FREE KEYS TODAY' : limited ? 'YOU HIT YOUR LIMIT' : error.status === 401 ? 'KEY PROBLEM' : 'NO PROVIDER COULD ANSWER';
+      const tag = ['own_keys_required', 'free_flights_used'].includes(error.code) ? 'FREE FLIGHT USED' : error.code === 'signup_limit' ? 'TRY TOMORROW' : limited ? 'SLOW DOWN' : error.status === 401 ? 'TRY AGAIN' : 'ALL GROUNDED';
       setTicket({ who, tag, tried: (error.tried || []).map(t => t.provider + ' ✕').join('  ') || '-', text: error.message, done: true, error: true });
       setBusy(false);
       return;
@@ -170,6 +170,17 @@ export default function Play() {
                   <div>SPEED<b ref={msRef}>0 ms</b></div>
                   <div>TRIED<b style={{ fontSize: 13 }}>{ticket.tried}</b></div>
                 </div>
+              </div>
+            )}
+            {gw.requireOwn && (
+              <div className="mut" style={{ font: '700 12px/1.5 var(--sans)', margin: '0 2px 10px', padding: '10px 12px', border: '1px dashed var(--acc)', borderRadius: 12 }}>
+                {gw.usage.dayLeft <= 0 ? 'You used your free flight on the site\u2019s keys.' : 'To fly, connect your own free Gemini or Groq key.'} Connect your own free key to keep going. It takes a minute and the quota is yours.{' '}
+                <span style={{ color: 'var(--acc)', cursor: 'pointer', textDecoration: 'underline' }} onClick={() => window.dispatchEvent(new CustomEvent('gw-nav', { detail: 'keys' }))}>Open the Keys page →</span>
+              </div>
+            )}
+            {gw.mode === 'live' && !gw.requireOwn && !gw.usingOwn && gw.signup?.daily_limit > 0 && gw.signup.daily_limit <= 3 && (
+              <div className="mut" style={{ font: '600 11.5px/1.5 var(--sans)', margin: '0 2px 10px' }}>
+                You get {gw.usage.dayLeft} free {gw.usage.dayLeft === 1 ? 'flight' : 'flights'} on the site&apos;s keys. For more, connect your own free key on the Keys page.
               </div>
             )}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '0 2px 8px', font: '700 10px var(--mono)', letterSpacing: '.1em', color: 'var(--mut)' }}>

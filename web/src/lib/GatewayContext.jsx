@@ -280,8 +280,8 @@ export function GatewayProvider({ children }) {
   }, [loadAdminKeys]);
 
   const value = useMemo(
-    () => ({ mode, providers: viewProviders, rawProviders: providers, byok, usingOwn, setByok, signup, adminOk, loadAdminKeys, getMyKey, loadUsage, keys, board, stats, overview, usage, last, setFault, chat, failedChat, launch, createKey, revokeKey, loadOverview, refresh, isDown, settings, setMode }),
-    [mode, viewProviders, providers, byok, usingOwn, setByok, signup, adminOk, loadAdminKeys, getMyKey, loadUsage, keys, board, stats, overview, usage, last, setFault, chat, failedChat, launch, createKey, revokeKey, loadOverview, refresh],
+    () => ({ mode, providers: viewProviders, rawProviders: providers, byok, usingOwn, requireOwn: mode === 'live' && !usingOwn && (!!signup?.require_own_keys || (!!settings.gatewayKey() && usage.dayMax > 0 && usage.dayLeft <= 0)), setByok, signup, adminOk, loadAdminKeys, getMyKey, loadUsage, keys, board, stats, overview, usage, last, setFault, chat, failedChat, launch, createKey, revokeKey, loadOverview, refresh, isDown, settings, setMode }),
+    [mode, viewProviders, providers, byok, usingOwn, signup, usage, setByok, signup, adminOk, loadAdminKeys, getMyKey, loadUsage, keys, board, stats, overview, usage, last, setFault, chat, failedChat, launch, createKey, revokeKey, loadOverview, refresh],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

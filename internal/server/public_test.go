@@ -246,3 +246,50 @@ func TestByokKeysNeverStoredOrEchoedAndBadOnesIgnored(t *testing.T) {
 		t.Fatalf("check: %d %s", resp.StatusCode, b)
 	}
 }
+
+func TestRequireOwnKeysBlocksVisitorsOnSiteQuotaOnly(t *testing.T) {
+	h := newHarness(t, hopts{})
+	h.srv.Config.RequireOwnKeys = true
+	h.srv.Config.PublicSignup, h.srv.Config.PublicKeyRPM, h.srv.Config.PublicKeyDaily = true, 5, 7
+	h.srv.Config.SignupPerIPPerDay, h.srv.Config.SignupGlobalPerDay = 5, 100
+
+	_, b := h.do("POST", "/v1/signup", "", nil, nil)
+	var out struct{ Key string }
+	_ = json.Unmarshal(b, &out)
+
+	resp, body := h.do("POST", "/v1/chat/completions", out.Key, chatBody(), nil)
+	if resp.StatusCode != 403 || !strings.Contains(string(body), "own_keys_required") {
+		t.Fatalf("visitor without own keys should be refused: %d %s", resp.StatusCode, body)
+	}
+	if resp, body := h.do("POST", "/v1/chat/completions", out.Key, chatBody(), map[string]string{alphaKey: "my-own-alpha-key-123456"}); resp.StatusCode != 200 {
+		t.Fatalf("visitor with own key should fly: %d %s", resp.StatusCode, body)
+	}
+	// the owner's own keys (not made by sign-up) still use the site's providers
+	owner := h.newKey("owner", 100, 100)
+	if resp, body := h.do("POST", "/v1/chat/completions", owner, chatBody(), nil); resp.StatusCode != 200 {
+		t.Fatalf("owner key should work: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestVisitorGetsFreeFlightThenMustBringOwnKey(t *testing.T) {
+	h := newHarness(t, hopts{})
+	h.srv.Config.PublicSignup, h.srv.Config.PublicKeyRPM, h.srv.Config.PublicKeyDaily = true, 5, 1
+	h.srv.Config.SignupPerIPPerDay, h.srv.Config.SignupGlobalPerDay = 5, 100
+	_, b := h.do("POST", "/v1/signup", "", nil, nil)
+	var out struct{ Key string }
+	_ = json.Unmarshal(b, &out)
+
+	q := func(s string) map[string]any {
+		return map[string]any{"model": "auto", "messages": []map[string]string{{"role": "user", "content": s}}}
+	}
+	if resp, body := h.do("POST", "/v1/chat/completions", out.Key, q("first"), nil); resp.StatusCode != 200 {
+		t.Fatalf("free flight: %d %s", resp.StatusCode, body)
+	}
+	resp, body := h.do("POST", "/v1/chat/completions", out.Key, q("second"), nil)
+	if resp.StatusCode != 429 || !strings.Contains(string(body), "free_flights_used") {
+		t.Fatalf("second flight on site keys should point to own keys: %d %s", resp.StatusCode, body)
+	}
+	if resp, body := h.do("POST", "/v1/chat/completions", out.Key, q("second"), map[string]string{alphaKey: "my-own-alpha-key-123456"}); resp.StatusCode != 200 {
+		t.Fatalf("with own key it should fly: %d %s", resp.StatusCode, body)
+	}
+}

@@ -59,8 +59,9 @@ type Config struct {
 	PublicKeyDaily     int
 	SignupPerIPPerDay  int
 	SignupGlobalPerDay int
-	ByokRPM            int // requests/minute for a key when the visitor brings their own provider keys
-	TrustedProxyHops   int // how many reverse proxies sit in front (Render = 1); used to find the real client IP
+	RequireOwnKeys     bool // visitors' keys may not use the site's own provider keys; they must bring theirs
+	ByokRPM            int  // requests/minute for a key when the visitor brings their own provider keys
+	TrustedProxyHops   int  // how many reverse proxies sit in front (Render = 1); used to find the real client IP
 
 	AllowedOrigins string
 	WebDist        string
@@ -184,6 +185,7 @@ func Load() (*Config, error) {
 		PublicKeyDaily:     integer("PUBLIC_KEY_DAILY", 20),
 		SignupPerIPPerDay:  integer("SIGNUP_PER_IP_PER_DAY", 3),
 		SignupGlobalPerDay: integer("SIGNUP_GLOBAL_PER_DAY", 200),
+		RequireOwnKeys:     boolean("REQUIRE_OWN_KEYS", false),
 		ByokRPM:            integer("BYOK_RPM", 30),
 		TrustedProxyHops:   integer("TRUSTED_PROXY_HOPS", 1),
 

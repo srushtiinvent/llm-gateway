@@ -29,6 +29,11 @@ export default function App() {
   const gw = useGateway();
   const [theme, setThemeState] = useState(() => document.documentElement.dataset.theme || 'dark');
   const [page, setPage] = useState('play');
+  useEffect(() => { // lets any page send the visitor to another page, e.g. Play -> Keys
+    const go = e => setPage(e.detail);
+    window.addEventListener('gw-nav', go);
+    return () => window.removeEventListener('gw-nav', go);
+  }, []);
   const [boot, setBoot] = useState('show'); // show -> leaving -> gone
   const first = useRef(true);
   const [blobOn, setBlobOn] = useState(false);
