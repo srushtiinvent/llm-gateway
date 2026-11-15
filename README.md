@@ -144,40 +144,94 @@ The `model` field chooses the routing:
 | `auto` (or anything unknown, like `gpt-4o`) | try providers in priority order, with fallback |
 | `fastest` | try the provider with the lowest recent latency first |
 | a provider name (`gemini`, `groq`...) | use only that provider, no fallback |
+| a real model name (`openai/gpt-oss-20b`) | a preference only: like `auto`, any model may answer, unless you send `X-Gateway-Strict-Model: true` |
+
+The response's `model` field (and the `X-Gateway-Model` header) is always the model that really answered.
 
 Every answer includes a `gateway` block (and `X-Gateway-*` headers) showing what happened:
 which provider answered, `cache` hit or miss, how many attempts, and the `tried` list such as
 `["gemini:rate_limited","groq:ok"]`.
 
-Send `"stream": true` for server-sent events. Send header `X-Gateway-Cache: bypass` to skip the cache.
+Send `"stream": true` for server-sent events.
+
+### Request headers
+
+| Header | Effect |
+|---|---|
+| `X-Gateway-No-Cache: true` (or `X-Gateway-Cache: bypass`) | do not read or write the cache for this request |
+| `X-Gateway-Strict-Model: true` | answer only with the model named in `model`; return an error instead of falling back to another model |
+| `X-Provider-Key-Groq: gsk_...` (also `-Gemini`, `-Openrouter`, `-Cerebras`, `-Mistral`) | use the caller's own provider key for this one request: works for any gateway key over the API, runs on the caller's provider quota, is not counted against the key's daily budget, and is never stored or logged |
+
+**Caching rules.** Answers are cached by conversation, routing choice and sampling settings
+(`temperature`, `max_tokens`, `top_p`). A request with `temperature` above 0 is **not** cached,
+because a stored answer would remove the randomness the caller asked for (set `CACHE_RANDOM=true` to
+cache those too). Cached answers are free: they use neither the per-minute limit nor the daily budget.
+
+### Limits and quota
+
+- **Per-minute limit** (per key): counts only requests that need a provider; cache hits are free.
+- **Daily budget** (per key, resets 00:00 UTC): counts only requests a provider actually answered on
+  the site's own provider keys. Requests rejected by a limit, requests no provider could answer, cache
+  hits and bring-your-own-key requests are never counted. `GET /admin/keys` shows `daily_used` and
+  `daily_remaining` for each key.
+- **Provider quotas**: each provider's free-tier limits are tracked per minute and per day. The daily
+  count resets at the provider's own reset time (`<NAME>_DAILY_RESET`, default midnight Pacific time
+  for Gemini, a rolling 24-hour window for the others). When a provider reports that its *daily*
+  quota is used up, the gateway rests it until that reset.
+
+`GET /v1/quota` (gateway key) returns, for the calling key, the per-minute and daily usage left, and
+for each provider the key may use: whether it can take a request now, what blocks it (`circuit_open`,
+`cooldown`, `rpm`, `tpm`, `rpd`), its remaining quota and reset time, plus `can_call_now` and
+`next_available_at`. Reading it uses no quota.
+
+### Per-key provider rules
+
+A key can list the providers it may use, in the order to try them:
+
+```bash
+curl -X POST localhost:8080/admin/keys -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"name":"eval-runner","providers":["groq","gemini","overflow"]}'
+curl -X POST localhost:8080/admin/keys/3/providers -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"providers":["groq","gemini"]}'          # change later; [] = default order
+```
+
+Keys without rules use every **free** provider in `PROVIDER_ORDER`. A **paid** provider (the optional
+`OVERFLOW_*` provider, see `.env.example`) is always tried last and only by keys whose rules name it,
+so visitor keys can never reach it. Set a hard spending cap in that provider's own console as well.
 
 ### Endpoints
 
 | Endpoint | Who | What |
 |---|---|---|
 | `POST /v1/chat/completions` | app (gateway key) | ask a question |
+| `GET /v1/quota` | app (gateway key) | what this key and its providers have left, and when it resets |
+| `GET /v1/usage` | app (gateway key) | this key's daily allowance (short form) |
 | `GET /v1/models` | anyone | list routing choices |
 | `GET /healthz` · `GET /readyz` | anyone | light check · check including the database |
 | `GET /admin/overview?window=1h\|6h\|24h\|7d` | admin | all dashboard numbers in one call |
 | `GET /admin/providers` | admin | each provider: breaker state, quota used, latency |
 | `POST /admin/providers/{name}/fault` | admin | failure simulator: `{"mode":"down\|slow\|ratelimited\|none"}` |
 | `GET /admin/logs?limit=50` | admin | recent requests (metadata only) |
-| `GET/POST /admin/keys`, `POST /admin/keys/{id}/revoke` | admin | manage gateway keys |
+| `GET/POST /admin/keys`, `POST /admin/keys/{id}/revoke` | admin | manage gateway keys (the list includes today's usage) |
+| `POST /admin/keys/{id}/providers` | admin | set a key's provider rules: `{"providers":["groq","gemini"]}` |
 | `POST /admin/cache/clear` | admin | forget cached answers |
 
 Admin endpoints need `Authorization: Bearer <ADMIN_TOKEN>`.
 
 ### Errors you may see
 
-| Status | `error.code` | Meaning |
-|---|---|---|
-| 401 | `missing_api_key` / `invalid_api_key` | no key, wrong key, or revoked key |
-| 429 | `rate_limit_exceeded` | this key sent too many requests per minute |
-| 429 | `daily_budget_exceeded` | this key used its daily budget (cache hits are free) |
-| 429 | `free_quota_exhausted` | every provider's free limit is used up right now (`Retry-After` tells you when) |
-| 503 | `overloaded` | the gateway queue is full, try again in a few seconds |
-| 503 | `all_providers_failed` | no provider could answer |
-| 400 | `provider_rejected_request` | the providers rejected the request itself |
+`error.type` tells a client what to do; `error.code` gives the detail. `Retry-After` (seconds) is set
+whenever waiting will help.
+
+| Status | `error.type` | `error.code` | Meaning · what to do |
+|---|---|---|---|
+| 401 | `authentication_error` | `missing_api_key` / `invalid_api_key` | no key, wrong key, or revoked key |
+| 429 | `key_rate_limit` | `rate_limit_exceeded` | this key's per-minute limit. Wait `Retry-After` seconds (a slot frees up) and continue |
+| 429 | `key_daily_budget` | `daily_budget_exceeded` / `free_flights_used` | this key's daily budget is used up. Stop the run; `Retry-After` and `gateway.resets_at` say when it resets (00:00 UTC). Cache hits still work |
+| 503 | `no_provider_available` | `free_quota_exhausted` / `all_providers_failed` | every provider is out of quota, paused, or failing. `Retry-After` and `gateway.available_at` give the earliest expected recovery |
+| 503 | `overloaded_error` | `overloaded` | the gateway queue is full, try again in a few seconds |
+| 400 | `invalid_request_error` | `model_not_available` | strict-model request for a model no allowed provider serves (`gateway.models` lists them) |
+| 400 | `invalid_request_error` | `provider_rejected_request` | the providers rejected the request itself |
 
 ---
 
@@ -245,4 +299,4 @@ For live frontend work use `cd web && npm run dev` (proxies `/v1`, `/admin`, `/h
 
 ### Bring your own provider keys
 
-On the Keys page a visitor can paste their own Gemini / Groq / OpenRouter keys. They stay in that visitor's browser and are sent as `X-Provider-Key-Gemini` (etc.) headers with each request. The gateway builds temporary providers from them for that one request, so the flight runs on the visitor's own provider quota, is not counted against the site's daily budget, uses a cache namespace of its own (nobody else can be served their answers), and the keys are never stored or logged. `POST /v1/byok/check` tests keys with a one-token call. Tests: `internal/server/public_test.go`.
+On the Keys page a visitor can paste their own Gemini / Groq / OpenRouter keys (any API client can send the same headers; see "Request headers" above). They stay in that visitor's browser and are sent as `X-Provider-Key-Gemini` (etc.) headers with each request. The gateway builds temporary providers from them for that one request, so the flight runs on the visitor's own provider quota, is not counted against the site's daily budget, uses a cache namespace of its own (nobody else can be served their answers), and the keys are never stored or logged. `POST /v1/byok/check` tests keys with a one-token call. Tests: `internal/server/public_test.go`.

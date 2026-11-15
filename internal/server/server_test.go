@@ -37,6 +37,7 @@ type hopts struct {
 	maxConcurrent, maxWaiting int
 	latency                   time.Duration
 	limits                    []quota.Limits // per provider (a, b, c)
+	paid                      []bool         // per provider (a, b, c)
 	st                        store.Store
 }
 
@@ -60,14 +61,15 @@ func newHarness(t *testing.T, o hopts) *harness {
 		}
 		entries = append(entries, router.NewEntry(router.EntryConfig{
 			Provider: provider.NewMock(n, n+"-model", o.latency), Limits: l, BreakerThreshold: 3, BreakerOpenFor: time.Minute, Mock: true,
+			Paid: i < len(o.paid) && o.paid[i],
 		}))
 	}
 	opts := router.DefaultOptions()
 	opts.MaxRetries = 0
 	rt := router.New(entries, opts)
 	cfg := &config.Config{DefaultKeyRPM: 20, DefaultKeyDaily: 100, AllowedOrigins: "*", PriceInPerM: 1, PriceOutPerM: 2, ByokRPM: 30}
-	for _, n := range names {
-		cfg.Providers = append(cfg.Providers, config.ProviderConfig{Name: n, Model: n + "-model", Mock: true})
+	for i, n := range names {
+		cfg.Providers = append(cfg.Providers, config.ProviderConfig{Name: n, Model: n + "-model", Mock: true, Paid: i < len(o.paid) && o.paid[i]})
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := New(Deps{
@@ -126,7 +128,8 @@ type chatOut struct {
 		Attempts int
 		Tried    []string
 	}
-	Error struct{ Code, Message string }
+	Error struct{ Code, Message, Type string }
+	Model string
 }
 
 func (h *harness) chat(key, model, text string, hdr map[string]string) (*http.Response, chatOut) {
@@ -188,8 +191,12 @@ func TestChatCacheAndHeaders(t *testing.T) {
 		t.Fatalf("second identical call must come from the cache: %+v", out.Gateway)
 	}
 	_, out = h.chat(key, "auto", "What is Go?", map[string]string{"X-Gateway-Cache": "bypass"})
-	if out.Gateway.Cache != "miss" {
+	if out.Gateway.Cache != "bypass" {
 		t.Fatal("bypass header must skip the cache")
+	}
+	_, out = h.chat(key, "auto", "What is Go?", map[string]string{"X-Gateway-No-Cache": "true"})
+	if out.Gateway.Cache != "bypass" {
+		t.Fatal("X-Gateway-No-Cache must skip the cache")
 	}
 	_, out = h.chat(key, "beta", "What is Go?", nil)
 	if out.Gateway.Provider != "beta" || out.Gateway.Cache != "miss" {
@@ -247,7 +254,7 @@ func TestAllProvidersDown(t *testing.T) {
 	}
 }
 
-func TestFreeQuotaExhaustedGives429WithRetryAfter(t *testing.T) {
+func TestFreeQuotaExhaustedGives503WithRetryAfter(t *testing.T) {
 	one := quota.Limits{RPM: 1}
 	h := newHarness(t, hopts{limits: []quota.Limits{one, one, one}})
 	key := h.newKey("app", 0, 0)
@@ -258,7 +265,7 @@ func TestFreeQuotaExhaustedGives429WithRetryAfter(t *testing.T) {
 		}
 	}
 	resp, out := h.chat(key, "auto", "qz", nil)
-	if resp.StatusCode != 429 || out.Error.Code != "free_quota_exhausted" || resp.Header.Get("Retry-After") == "" {
+	if resp.StatusCode != 503 || out.Error.Type != "no_provider_available" || out.Error.Code != "free_quota_exhausted" || resp.Header.Get("Retry-After") == "" {
 		t.Fatalf("all quotas used: %d %+v retry-after=%q", resp.StatusCode, out.Error, resp.Header.Get("Retry-After"))
 	}
 	_, out = h.chat(key, "auto", "qa", nil) // but a repeated question still works: it comes from the cache
@@ -275,9 +282,18 @@ func TestPerKeyRateLimitAndDailyBudget(t *testing.T) {
 			t.Fatalf("request %d should pass", i)
 		}
 	}
-	resp, out := h.chat(limited, "auto", "same", nil)
-	if resp.StatusCode != 429 || out.Error.Code != "rate_limit_exceeded" || resp.Header.Get("Retry-After") == "" {
-		t.Fatalf("third request in a minute: %d %+v", resp.StatusCode, out.Error)
+	// the second "same" was a cache hit, so it did not use a slot: one more new question fits
+	if resp, out := h.chat(limited, "auto", "new one", nil); resp.StatusCode != 200 || out.Gateway.Cache != "miss" {
+		t.Fatalf("cache hits must not use the per-minute limit: %d %+v", resp.StatusCode, out.Error)
+	}
+	resp, out := h.chat(limited, "auto", "another new one", nil)
+	if resp.StatusCode != 429 || out.Error.Type != "key_rate_limit" || out.Error.Code != "rate_limit_exceeded" || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("third provider call in a minute: %d %+v", resp.StatusCode, out.Error)
+	}
+	for i := 0; i < 5; i++ { // ...while repeated questions keep coming from the cache
+		if resp, out := h.chat(limited, "auto", "same", nil); resp.StatusCode != 200 || out.Gateway.Cache != "hit" {
+			t.Fatalf("cache hit while rate limited: %d %+v", resp.StatusCode, out.Error)
+		}
 	}
 	other := h.newKey("other", 0, 0)
 	if resp, _ := h.chat(other, "auto", "same", nil); resp.StatusCode != 200 {
@@ -289,7 +305,7 @@ func TestPerKeyRateLimitAndDailyBudget(t *testing.T) {
 		h.chat(budget, "auto", "unique "+string(rune('a'+i)), nil)
 	}
 	resp, out = h.chat(budget, "auto", "unique c", nil)
-	if resp.StatusCode != 429 || out.Error.Code != "daily_budget_exceeded" {
+	if resp.StatusCode != 429 || out.Error.Type != "key_daily_budget" || out.Error.Code != "daily_budget_exceeded" || resp.Header.Get("Retry-After") == "" {
 		t.Fatalf("daily budget: %d %+v", resp.StatusCode, out.Error)
 	}
 	if resp, out := h.chat(budget, "auto", "unique a", nil); resp.StatusCode != 200 || out.Gateway.Cache != "hit" {

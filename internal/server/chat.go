@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -54,10 +55,10 @@ func truncate(s string, n int) string {
 	return s
 }
 
-func untilUTCMidnight() time.Duration {
-	now := time.Now().UTC()
-	return now.Truncate(24 * time.Hour).Add(24 * time.Hour).Sub(now)
-}
+// nextUTCMidnight is when key budgets reset.
+func nextUTCMidnight() time.Time { return time.Now().UTC().Truncate(24 * time.Hour).Add(24 * time.Hour) }
+
+func untilUTCMidnight() time.Duration { return time.Until(nextUTCMidnight()) }
 
 func gatewayHeaders(w http.ResponseWriter, info *openai.GatewayInfo) {
 	h := w.Header()
@@ -81,11 +82,30 @@ func writeSSE(w io.Writer, v any) error {
 	return err
 }
 
+// Error types a client can act on (error.type in the JSON body):
+//
+//	key_rate_limit        429  this key's per-minute limit; Retry-After = seconds until a slot frees
+//	key_daily_budget      429  this key's daily budget is used up; Retry-After = seconds until it resets
+//	no_provider_available 503  every provider is out of quota or paused; Retry-After = earliest reset
+const (
+	errKeyRateLimit   = "key_rate_limit"
+	errKeyDailyBudget = "key_daily_budget"
+	errNoProvider     = "no_provider_available"
+)
+
+func headerTrue(r *http.Request, name string) bool {
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // handleChat is POST /v1/chat/completions: the main endpoint.
 //
-//  1. who are you?            (API key)
-//  2. are you asking too often? (per-key rate limit and daily budget)
-//  3. do I already know this?   (cache)
+//  1. who are you?              (API key)
+//  2. do I already know this?   (cache: answers from the cache are free, so no limit applies to them)
+//  3. are you asking too often? (per-key rate limit, then the daily budget)
 //  4. is there room right now?  (queue / backpressure)
 //  5. ask a provider            (router: fallback, retries, quotas, circuit breakers)
 //  6. remember and log the result
@@ -108,8 +128,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Visitors may bring their own provider keys. Those requests run on the visitor's own provider
-	// quota, so they are not counted against the site's daily budget (the per-minute limit still applies).
+	// Callers may bring their own provider keys (X-Provider-Key-Groq: ...), over the API or from the
+	// website. Those requests run on the caller's own provider quota, so they are not counted against
+	// the key's daily budget (the per-minute limit still applies).
 	byokKeys := s.parseByok(r)
 	byok := len(byokKeys) > 0
 	if s.Config.RequireOwnKeys && !byok && strings.HasPrefix(key.Name, visitorKeyPrefix) {
@@ -120,13 +141,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	rpm := key.RPMLimit
 	if byok && s.Config.ByokRPM > 0 && (rpm == 0 || rpm < s.Config.ByokRPM) {
 		rpm = s.Config.ByokRPM
-	}
-
-	// 2. limits for this key (per-minute rate; the daily budget comes after the cache)
-	if ok, wait := s.Limiter.Allow(key.ID, rpm); !ok {
-		writeError(w, http.StatusTooManyRequests, "rate_limit_error", "rate_limit_exceeded",
-			fmt.Sprintf("Too many requests for this key (limit: %d per minute). Try again in %d seconds.", rpm, int(wait.Seconds())+1), wait, nil)
-		return
 	}
 
 	// read and check the request
@@ -141,26 +155,45 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Optional per-request failure test, e.g. "X-Gateway-Simulate: gemini=down". Affects only this request.
-	rt := s.Router
+	// Which providers this request may use: the key's own rules (or the free default), or the
+	// caller's own keys.
+	rt := s.routerFor(key)
 	if byok {
 		rt = s.Router.Derive(s.byokEntries(byokKeys))
 	}
 	r = r.WithContext(context.WithValue(r.Context(), reqInfoKey{}, &reqInfo{rt: rt, byok: byok}))
+	// Optional per-request failure test, e.g. "X-Gateway-Simulate: gemini=down". Affects only this request.
 	sim := provider.ParseSimHeader(r.Header.Get("X-Gateway-Simulate"), func(n string) bool { _, ok := rt.Get(n); return ok })
 	if len(sim) > 0 {
 		r = r.WithContext(provider.WithSim(r.Context(), sim))
 	}
 
+	// Strict model: answer with exactly the model asked for, or fail. No fallback to other models.
 	st := rt.Resolve(req.Model)
+	if headerTrue(r, "X-Gateway-Strict-Model") {
+		var ok bool
+		if st, ok = rt.ResolveStrict(req.Model); !ok {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "model_not_available",
+				fmt.Sprintf("No provider available to this key serves the model %q, and X-Gateway-Strict-Model is on, so the gateway will not substitute another model. Available models: %s.",
+					req.Model, strings.Join(rt.Models(), ", ")),
+				0, map[string]any{"models": rt.Models()})
+			return
+		}
+	}
+
 	lg := store.RequestLog{KeyID: key.ID, RequestedModel: req.Model, Stream: req.Stream, Status: "ok"}
 	defer func() {
 		lg.LatencyMs = time.Since(start).Milliseconds()
 		s.logs.add(lg)
 	}()
 
-	// 3. cache
-	bypass := len(sim) > 0 || r.Header.Get("X-Gateway-Cache") == "bypass" || strings.Contains(strings.ToLower(r.Header.Get("Cache-Control")), "no-cache")
+	// 2. cache. Skipped for failure tests, when the caller asks (X-Gateway-No-Cache: true,
+	// X-Gateway-Cache: bypass, Cache-Control: no-cache), and when the caller asked for randomness
+	// (temperature above 0): a stored answer would remove the variety they asked for.
+	random := req.Temperature != nil && *req.Temperature > 0 && !s.Config.CacheRandom
+	bypass := len(sim) > 0 || random || headerTrue(r, "X-Gateway-No-Cache") ||
+		r.Header.Get("X-Gateway-Cache") == "bypass" ||
+		strings.Contains(strings.ToLower(r.Header.Get("Cache-Control")), "no-cache")
 	route := st.Route()
 	if byok {
 		route += "|byok:" + byokFingerprint(byokKeys) // one visitor's cached answers are never served to anyone else
@@ -173,19 +206,27 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Daily budget: counts only requests that reach a provider, so it is checked AFTER the cache
-	// (answers from the cache are free and keep working even when the budget is used up).
+	// 3. limits for this key. Both come AFTER the cache: answers from the cache cost nothing, so
+	// they neither use a per-minute slot nor count against the daily budget.
+	if ok, wait := s.Limiter.Allow(key.ID, rpm); !ok {
+		lg.Status, lg.Error = "error", "key_rate_limit"
+		writeError(w, http.StatusTooManyRequests, errKeyRateLimit, "rate_limit_exceeded",
+			fmt.Sprintf("Too many requests for this key (limit: %d per minute). Try again in %d seconds.", rpm, int(math.Ceil(wait.Seconds()))),
+			wait, map[string]any{"limit_per_minute": rpm, "retry_after_sec": int(math.Ceil(wait.Seconds()))})
+		return
+	}
 	if !byok && !s.Budget.Allow(ctx, key) {
 		lg.Status, lg.Error = "error", "daily_budget_exceeded"
+		extra := map[string]any{"daily_limit": key.DailyLimit, "resets_at": nextUTCMidnight().Format(time.RFC3339)}
 		if strings.HasPrefix(key.Name, visitorKeyPrefix) {
-			writeError(w, http.StatusTooManyRequests, "rate_limit_error", "free_flights_used",
+			writeError(w, http.StatusTooManyRequests, errKeyDailyBudget, "free_flights_used",
 				"You have used your free flights on this site's keys. Add your own free Gemini or Groq key on the Keys page to keep going. Repeated questions from the cache are still free.",
-				untilUTCMidnight(), nil)
+				untilUTCMidnight(), extra)
 			return
 		}
-		writeError(w, http.StatusTooManyRequests, "rate_limit_error", "daily_budget_exceeded",
-			fmt.Sprintf("This key has used its daily budget (%d requests that reached a provider). It resets at 00:00 UTC. Repeated questions answered from the cache are free.", key.DailyLimit),
-			untilUTCMidnight(), nil)
+		writeError(w, http.StatusTooManyRequests, errKeyDailyBudget, "daily_budget_exceeded",
+			fmt.Sprintf("This key has used its daily budget (%d requests answered by a provider). It resets at 00:00 UTC. Repeated questions answered from the cache are free.", key.DailyLimit),
+			untilUTCMidnight(), extra)
 		return
 	}
 
@@ -222,8 +263,9 @@ func (s *Server) chatOnce(w http.ResponseWriter, r *http.Request, req *openai.Ch
 		s.writeRouteError(w, r.Context(), err, tr, lg)
 		return
 	}
-	if !ri.byok {
+	if !ri.byok { // a provider answered on the site's own keys: this is what the daily budget counts
 		s.Budget.Used(key)
+		lg.Billed = true
 	}
 
 	if resp.Usage.PromptTokens == 0 && resp.Usage.CompletionTokens == 0 { // provider did not report usage
@@ -241,7 +283,7 @@ func (s *Server) chatOnce(w http.ResponseWriter, r *http.Request, req *openai.Ch
 		s.Cache.Put(ckey, resp, tr.Provider)
 	}
 	info := &openai.GatewayInfo{
-		Provider: tr.Provider, Cache: "miss", LatencyMs: time.Since(start).Milliseconds(),
+		Provider: tr.Provider, Cache: missState(bypass), LatencyMs: time.Since(start).Milliseconds(),
 		Attempts: tr.Calls, Tried: tr.Summary(), Trimmed: tr.Trimmed, QueuedMs: waited.Milliseconds(),
 	}
 	resp.Gateway = info
@@ -250,7 +292,16 @@ func (s *Server) chatOnce(w http.ResponseWriter, r *http.Request, req *openai.Ch
 	lg.PromptTokens, lg.CompletionTokens = resp.Usage.PromptTokens, resp.Usage.CompletionTokens
 
 	gatewayHeaders(w, info)
+	w.Header().Set("X-Gateway-Model", resp.Model)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// missState is the X-Gateway-Cache value for an answer that did not come from the cache.
+func missState(bypass bool) string {
+	if bypass {
+		return "bypass"
+	}
+	return "miss"
 }
 
 func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, req *openai.ChatRequest, st router.Strategy,
@@ -267,11 +318,13 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, req *openai.
 	}
 	if !ri.byok {
 		s.Budget.Used(key)
+		lg.Billed = true
 	}
 	lg.Provider, lg.Model = tr.Provider, tr.Model
 
 	// From here on we are committed to this provider: the first bytes are about to reach the user.
-	gatewayHeaders(w, &openai.GatewayInfo{Provider: tr.Provider, Cache: "miss", Attempts: tr.Calls, Tried: tr.Summary()})
+	gatewayHeaders(w, &openai.GatewayInfo{Provider: tr.Provider, Cache: missState(bypass), Attempts: tr.Calls, Tried: tr.Summary()})
+	w.Header().Set("X-Gateway-Model", tr.Model)
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -402,39 +455,35 @@ func (s *Server) writeRouteError(w http.ResponseWriter, ctx context.Context, err
 	var fe *router.FailedError
 	if errors.As(err, &fe) {
 		lg.Error = truncate(fe.Error(), 300)
-		switch fe.Kind {
-		case "bad_request":
+		if fe.Kind == "bad_request" {
 			writeError(w, http.StatusBadRequest, "invalid_request_error", "provider_rejected_request",
 				"The AI provider rejected this request: "+fe.Last.Message, 0, extra)
-		case "quota_exhausted":
-			msg := "Every provider has used up its free-tier limit right now."
-			if fe.Pinned {
-				msg = "That provider has used up its free-tier limit right now."
-			}
-			if fe.RetryAfter > 0 {
-				msg += fmt.Sprintf(" The next slot frees up in about %s.", fe.RetryAfter.Round(time.Second))
-			}
-			writeError(w, http.StatusTooManyRequests, "rate_limit_error", "free_quota_exhausted", msg, fe.RetryAfter, extra)
-		default:
-			msg := "No AI provider could answer right now."
-			if fe.Last != nil {
-				msg += " Last error: " + fe.Last.Error()
-			}
-			writeError(w, http.StatusServiceUnavailable, "server_error", "all_providers_failed", msg, minDuration(fe.RetryAfter, 30*time.Second), extra)
+			return
 		}
+		// Out of quota, paused by the circuit breaker, or failing: either way no provider can
+		// answer now. Tell the caller when the earliest one is expected back.
+		wait := fe.RetryAfter
+		code, msg := "all_providers_failed", "No AI provider could answer right now."
+		if fe.Kind == "quota_exhausted" {
+			code, msg = "free_quota_exhausted", "Every provider has used up its free-tier limit right now."
+			if fe.Pinned {
+				msg = "The provider(s) for this model have used up their free-tier limit right now."
+			}
+		} else if fe.Last != nil {
+			msg += " Last error: " + fe.Last.Error()
+		}
+		if wait <= 0 {
+			wait = 10 * time.Second // nothing told us when; a short pause before trying again
+		}
+		at := time.Now().Add(wait)
+		msg += fmt.Sprintf(" The earliest provider is expected back in about %s (at %s).",
+			wait.Round(time.Second), at.UTC().Format("15:04 UTC"))
+		extra["retry_after_sec"] = int(math.Ceil(wait.Seconds()))
+		extra["available_at"] = at.UTC().Format(time.RFC3339)
+		writeError(w, http.StatusServiceUnavailable, errNoProvider, code, msg, wait, extra)
 		return
 	}
 	lg.Error = truncate(err.Error(), 300)
 	s.Logger.Error("unexpected routing error", "err", err)
 	writeError(w, http.StatusInternalServerError, "server_error", "internal_error", "Something went wrong inside the gateway.", 0, extra)
-}
-
-func minDuration(a, b time.Duration) time.Duration {
-	if a <= 0 {
-		return 0
-	}
-	if a < b {
-		return a
-	}
-	return b
 }

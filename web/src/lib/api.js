@@ -158,8 +158,11 @@ export function normKeys(json) {
       prefix: String(pick(k, ['prefix'], 'gw_')) + '…',
       perMin: num(pick(k, ['rpm_limit'], 0)),
       perDay: num(pick(k, ['daily_limit'], 0)),
-      left: 0,
-      usedPct: 0,
+      // 0 = unlimited; the server sends today's billed calls as daily_used
+      left: num(pick(k, ['daily_limit'], 0)) > 0 ? num(pick(k, ['daily_remaining'], 0)) : '∞',
+      usedPct: num(pick(k, ['daily_limit'], 0)) > 0
+        ? Math.min(100, Math.round((100 * num(pick(k, ['daily_used'], 0))) / num(pick(k, ['daily_limit'], 1))))
+        : 0,
       lastUsed: created ? 'created ' + new Date(created).toLocaleDateString() : '-',
       status: revoked ? 'REVOKED' : 'ACTIVE',
     };

@@ -206,15 +206,23 @@ var byokKeyRE = regexp.MustCompile(`^[A-Za-z0-9_.\-]{12,256}$`)
 
 func baseName(n string) string { return strings.TrimPrefix(strings.ToLower(n), "mock-") }
 
+// byokHeader is the request header carrying a visitor's own key, e.g. "X-Provider-Key-Groq".
+func byokHeader(provider string) string {
+	b := baseName(provider)
+	return "X-Provider-Key-" + strings.ToUpper(b[:1]) + b[1:]
+}
+
 // parseByok returns {"gemini": "...", "groq": "..."} for providers this gateway knows about.
 // Malformed values are ignored.
 func (s *Server) parseByok(r *http.Request) map[string]string {
 	out := map[string]string{}
 	for _, pc := range s.Config.Providers {
-		b := baseName(pc.Name)
-		v := strings.TrimSpace(r.Header.Get("X-Provider-Key-" + strings.ToUpper(b[:1]) + b[1:]))
+		if pc.Paid {
+			continue
+		}
+		v := strings.TrimSpace(r.Header.Get(byokHeader(pc.Name)))
 		if byokKeyRE.MatchString(v) {
-			out[b] = v
+			out[baseName(pc.Name)] = v
 		}
 	}
 	return out
@@ -240,7 +248,7 @@ func (s *Server) byokEntries(keys map[string]string) []*router.Entry {
 	var entries []*router.Entry
 	for _, pc := range c.Providers {
 		k, ok := keys[baseName(pc.Name)]
-		if !ok {
+		if !ok || pc.Paid {
 			continue
 		}
 		var p provider.Provider

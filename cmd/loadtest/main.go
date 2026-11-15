@@ -213,7 +213,7 @@ func (s summary) print(n, c, prompts int, model string, stream bool) {
 	row("Cache hits", s.Hit)
 	fmt.Println()
 	if s.Status["429"] > 0 {
-		fmt.Println("  Note: 429 means a rate limit was reached (your key's per-minute limit, daily budget, or free quotas).")
+		fmt.Println("  Note: 429 means your key's per-minute limit or daily budget was reached; 503 means no provider had quota left.")
 		fmt.Println("  That is the gateway protecting you. For a bigger test, create a key with higher limits.")
 	}
 }

@@ -26,7 +26,10 @@ type Key struct {
 	DailyLimit int       `json:"daily_limit"`
 	Revoked    bool      `json:"revoked"`
 	CreatedAt  time.Time `json:"created_at"`
-	Hash       string    `json:"-"`
+	// Providers this key may use, in the order to try them. Empty = the gateway's default order
+	// (every free provider). A paid provider is only reachable by a key that lists it here.
+	Providers []string `json:"providers"`
+	Hash      string   `json:"-"`
 }
 
 // RequestLog is one line of history for one chat request.
@@ -46,6 +49,10 @@ type RequestLog struct {
 	Attempts         int       `json:"attempts"`
 	Tried            string    `json:"tried"`
 	Error            string    `json:"error"`
+	// Billed is true when this request was charged to the key's daily budget (a provider
+	// actually answered it, on the site's own provider keys). Cache hits, rejected requests,
+	// requests that never reached a provider and bring-your-own-key requests are never billed.
+	Billed bool `json:"billed"`
 }
 
 // ProviderStat summarises one provider over a time window.
@@ -89,10 +96,13 @@ type Store interface {
 	FindKeyByHash(ctx context.Context, hash string) (*Key, error)
 	ListKeys(ctx context.Context) ([]Key, error)
 	RevokeKey(ctx context.Context, id int64) error
+	// SetKeyProviders replaces the key's provider rules (nil or empty = default order).
+	SetKeyProviders(ctx context.Context, id int64, providers []string) error
 
 	InsertLog(ctx context.Context, l RequestLog) error
 	RecentLogs(ctx context.Context, limit int) ([]RequestLog, error)
-	// CountProviderCalls counts requests by a key that actually reached a provider (not cache hits) since `since`.
+	// CountProviderCalls counts a key's billed requests (see RequestLog.Billed) since `since`.
+	// It must agree with the in-memory budget counter, which is reloaded from it after a restart.
 	CountProviderCalls(ctx context.Context, keyID int64, since time.Time) (int, error)
 	Stats(ctx context.Context, since time.Time, bucket time.Duration) (Stats, error)
 	PurgeLogs(ctx context.Context, before time.Time) (int64, error)

@@ -87,9 +87,17 @@ func TestBudget(t *testing.T) {
 	if !b.Allow(ctx, &store.Key{ID: 2, DailyLimit: 0}) {
 		t.Fatal("0 = unlimited")
 	}
-	// after a restart the count is rebuilt from the saved log
-	s.InsertLog(ctx, store.RequestLog{KeyID: 7, Status: "ok"})
-	s.InsertLog(ctx, store.RequestLog{KeyID: 7, Status: "ok"})
+	// after a restart the count is rebuilt from the saved log: only billed requests count
+	// (not rejected ones, not cache hits), so a key that hit its limit is not stuck at zero.
+	s.InsertLog(ctx, store.RequestLog{KeyID: 7, Status: "ok", Billed: true})
+	for i := 0; i < 5; i++ {
+		s.InsertLog(ctx, store.RequestLog{KeyID: 7, Status: "error", Error: "daily_budget_exceeded"})
+		s.InsertLog(ctx, store.RequestLog{KeyID: 7, Status: "ok", CacheHit: true})
+	}
+	if n, _ := NewBudget(s).Usage(ctx, &store.Key{ID: 7, DailyLimit: 2}); n != 1 {
+		t.Fatalf("after a restart: used = %d, want 1 (only billed requests count)", n)
+	}
+	s.InsertLog(ctx, store.RequestLog{KeyID: 7, Status: "ok", Billed: true})
 	if NewBudget(s).Allow(ctx, &store.Key{ID: 7, DailyLimit: 2}) {
 		t.Fatal("usage must survive a restart (read back from the log)")
 	}

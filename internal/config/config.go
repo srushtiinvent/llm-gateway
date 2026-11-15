@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/srushtiinvent/llm-gateway/internal/quota"
 )
 
 // ProviderConfig describes one AI provider the gateway can call.
@@ -19,8 +21,12 @@ type ProviderConfig struct {
 	Model          string
 	RPM, RPD, TPM  int // free-tier limits: requests/minute, requests/day, tokens/minute (0 = unlimited)
 	MaxInputTokens int // if a conversation is longer than this, old messages are dropped (0 = never)
-	Mock           bool
-	MockLatency    time.Duration
+	// DailyReset is when the provider's daily quota resets (nil = rolling 24-hour window).
+	// Set with <NAME>_DAILY_RESET, e.g. GEMINI_DAILY_RESET="00:00 America/Los_Angeles".
+	DailyReset  *quota.Reset
+	Paid        bool // costs real money: used last, and only by keys whose provider rules name it
+	Mock        bool
+	MockLatency time.Duration
 }
 
 // Config holds every setting.
@@ -42,6 +48,9 @@ type Config struct {
 
 	CacheTTL        time.Duration
 	CacheMaxEntries int
+	// CacheRandom: also cache requests that ask for randomness (temperature above 0).
+	// Off by default, so two identical requests at temperature 0.7 get two different answers.
+	CacheRandom bool
 
 	DefaultKeyRPM    int
 	DefaultKeyDaily  int
@@ -172,6 +181,7 @@ func Load() (*Config, error) {
 
 		CacheTTL:        duration("CACHE_TTL", time.Hour),
 		CacheMaxEntries: integer("CACHE_MAX_ENTRIES", 1000),
+		CacheRandom:     boolean("CACHE_RANDOM", false),
 
 		DefaultKeyRPM:    integer("DEFAULT_KEY_RPM", 20),
 		DefaultKeyDaily:  integer("DEFAULT_KEY_DAILY", 500),
@@ -239,22 +249,70 @@ func Load() (*Config, error) {
 			RPM:     integer("OPENROUTER_RPM", 20), RPD: integer("OPENROUTER_RPD", 50), TPM: integer("OPENROUTER_TPM", 0),
 			MaxInputTokens: integer("OPENROUTER_MAX_INPUT_TOKENS", 8000),
 		},
+		"cerebras": {
+			Name: "cerebras", APIKey: str("CEREBRAS_API_KEY", ""),
+			BaseURL: str("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
+			Model:   str("CEREBRAS_MODEL", "llama3.1-8b"),
+			RPM:     integer("CEREBRAS_RPM", 30), RPD: integer("CEREBRAS_RPD", 14400), TPM: integer("CEREBRAS_TPM", 60000),
+			MaxInputTokens: integer("CEREBRAS_MAX_INPUT_TOKENS", 7000),
+		},
+		"mistral": {
+			Name: "mistral", APIKey: str("MISTRAL_API_KEY", ""),
+			BaseURL: str("MISTRAL_BASE_URL", "https://api.mistral.ai/v1"),
+			Model:   str("MISTRAL_MODEL", "mistral-small-latest"),
+			RPM:     integer("MISTRAL_RPM", 60), RPD: integer("MISTRAL_RPD", 0), TPM: integer("MISTRAL_TPM", 500000),
+			MaxInputTokens: integer("MISTRAL_MAX_INPUT_TOKENS", 30000),
+		},
 	}
+	// Daily reset times. Google resets Gemini's free quota at midnight Pacific time; for the
+	// others the default is a rolling 24-hour window (the safe choice when the rule is unknown).
+	resetDefaults := map[string]string{"gemini": "00:00 America/Los_Angeles"}
 
-	order := strings.Split(str("PROVIDER_ORDER", "gemini,groq,openrouter"), ",")
+	order := strings.Split(str("PROVIDER_ORDER", "gemini,groq,openrouter,cerebras,mistral"), ",")
 	for _, name := range order {
 		name = strings.ToLower(strings.TrimSpace(name))
 		p, ok := known[name]
 		if !ok {
-			return nil, fmt.Errorf("PROVIDER_ORDER contains unknown provider %q (use gemini, groq, openrouter)", name)
+			return nil, fmt.Errorf("PROVIDER_ORDER contains unknown provider %q (use gemini, groq, openrouter, cerebras, mistral)", name)
 		}
 		if p.APIKey == "" {
 			continue // no key = provider is simply not used
 		}
+		r, err := quota.ParseReset(str(strings.ToUpper(name)+"_DAILY_RESET", resetDefaults[name]))
+		if err != nil {
+			return nil, fmt.Errorf("%s_DAILY_RESET: %w", strings.ToUpper(name), err)
+		}
+		p.DailyReset = r
 		c.Providers = append(c.Providers, p)
 	}
-	if len(c.Providers) == 0 {
-		return nil, fmt.Errorf("no providers configured: add at least one API key (GEMINI_API_KEY, GROQ_API_KEY or OPENROUTER_API_KEY) to .env, or set MOCK_PROVIDERS=true to try the gateway without any keys")
+
+	// Optional paid overflow: any OpenAI-compatible API, tried only after every free provider,
+	// and only by keys whose provider rules list "overflow". Put a hard spending cap on it in
+	// that provider's own console; the gateway's limits below are a second line of defence.
+	if k := str("OVERFLOW_API_KEY", ""); k != "" {
+		base, model := str("OVERFLOW_BASE_URL", ""), str("OVERFLOW_MODEL", "")
+		if base == "" || model == "" {
+			return nil, fmt.Errorf("OVERFLOW_API_KEY is set, so OVERFLOW_BASE_URL and OVERFLOW_MODEL are required too")
+		}
+		r, err := quota.ParseReset(str("OVERFLOW_DAILY_RESET", ""))
+		if err != nil {
+			return nil, fmt.Errorf("OVERFLOW_DAILY_RESET: %w", err)
+		}
+		c.Providers = append(c.Providers, ProviderConfig{
+			Name: "overflow", APIKey: k, BaseURL: base, Model: model, Paid: true,
+			RPM: integer("OVERFLOW_RPM", 30), RPD: integer("OVERFLOW_RPD", 200), TPM: integer("OVERFLOW_TPM", 0),
+			MaxInputTokens: integer("OVERFLOW_MAX_INPUT_TOKENS", 30000), DailyReset: r,
+		})
+	}
+
+	free := 0
+	for _, p := range c.Providers {
+		if !p.Paid {
+			free++
+		}
+	}
+	if free == 0 {
+		return nil, fmt.Errorf("no providers configured: add at least one API key (GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, CEREBRAS_API_KEY or MISTRAL_API_KEY) to .env, or set MOCK_PROVIDERS=true to try the gateway without any keys")
 	}
 	return c, nil
 }

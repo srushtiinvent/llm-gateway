@@ -8,6 +8,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/srushtiinvent/llm-gateway/internal/openai"
@@ -98,6 +99,18 @@ func (e *Error) CountsAgainstBreaker() bool {
 // Refundable reports whether the failed call probably did not use up free-tier quota.
 func (e *Error) Refundable() bool {
 	return e.Kind == KindNetwork || e.Kind == KindTimeout || e.Kind == KindServer
+}
+
+// DailyQuota reports whether a rate-limit error is about the DAILY quota (as opposed to a
+// per-minute limit). Providers say so in the message, e.g. Gemini's
+// "GenerateRequestsPerDayPerProjectPerModel-FreeTier" or Groq's "requests per day (RPD)".
+func (e *Error) DailyQuota() bool {
+	if e.Kind != KindRateLimited {
+		return false
+	}
+	m := strings.ToLower(e.Message)
+	return strings.Contains(m, "perday") || strings.Contains(m, "per day") || strings.Contains(m, "per_day") ||
+		strings.Contains(m, "daily") || strings.Contains(m, "(rpd)")
 }
 
 // KindFromStatus turns an HTTP status code into an ErrKind.

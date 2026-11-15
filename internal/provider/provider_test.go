@@ -218,3 +218,19 @@ func TestFaultInjection(t *testing.T) {
 		t.Fatal("unknown mode must be rejected")
 	}
 }
+
+func TestDailyQuotaDetection(t *testing.T) {
+	cases := map[string]bool{
+		"Quota exceeded for metric: GenerateRequestsPerDayPerProjectPerModel-FreeTier":      true,
+		"Rate limit reached for model `x` on requests per day (RPD): Limit 1000, Used 1000": true,
+		"Rate limit reached on requests per minute (RPM)":                                   false,
+	}
+	for msg, want := range cases {
+		if got := (&Error{Kind: KindRateLimited, Message: msg}).DailyQuota(); got != want {
+			t.Errorf("%q: got %v", msg, got)
+		}
+	}
+	if (&Error{Kind: KindServer, Message: "per day"}).DailyQuota() {
+		t.Error("only rate-limit errors are about quota")
+	}
+}

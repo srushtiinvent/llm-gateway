@@ -38,6 +38,7 @@ type Deps struct {
 // Server handles all HTTP requests.
 type Server struct {
 	Deps
+	free    *router.Router // the default route for keys without provider rules: free providers only
 	logs    *logWriter
 	signups signupGuard
 	checks  signupGuard
@@ -46,7 +47,33 @@ type Server struct {
 
 // New creates the server and starts its background log writer.
 func New(d Deps) *Server {
-	return &Server{Deps: d, logs: newLogWriter(d.Store, d.Logger), started: time.Now()}
+	s := &Server{Deps: d, logs: newLogWriter(d.Store, d.Logger), started: time.Now(), free: d.Router}
+	var free []*router.Entry
+	for _, e := range d.Router.Entries() {
+		if !e.Paid {
+			free = append(free, e)
+		}
+	}
+	if len(free) != len(d.Router.Entries()) {
+		s.free = d.Router.Derive(free) // same entries (shared quotas and breakers), paid ones left out
+	}
+	return s
+}
+
+// routerFor returns the providers a key may use, in the order it should try them.
+// Keys without rules get every free provider in the gateway's order. A paid provider is
+// only reachable by a key whose rules name it.
+func (s *Server) routerFor(k *store.Key) *router.Router {
+	if len(k.Providers) == 0 {
+		return s.free
+	}
+	var entries []*router.Entry
+	for _, n := range k.Providers {
+		if e, ok := s.Router.Get(n); ok {
+			entries = append(entries, e)
+		}
+	}
+	return s.Router.Derive(entries)
 }
 
 // Close flushes pending request logs. Call it when shutting down.
@@ -60,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /readyz", s.handleReady)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1/usage", s.handleUserUsage)
+	mux.HandleFunc("GET /v1/quota", s.handleQuota)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
 	mux.HandleFunc("POST /v1/signup", s.handleSignup)
 	mux.HandleFunc("POST /v1/byok/check", s.handleByokCheck)
@@ -72,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/keys", s.admin(s.handleListKeys))
 	mux.HandleFunc("POST /admin/keys", s.admin(s.handleCreateKey))
 	mux.HandleFunc("POST /admin/keys/{id}/revoke", s.admin(s.handleRevokeKey))
+	mux.HandleFunc("POST /admin/keys/{id}/providers", s.admin(s.handleKeyProviders))
 	mux.HandleFunc("POST /admin/cache/clear", s.admin(s.handleClearCache))
 
 	if dir := s.Config.WebDist; dir != "" {
@@ -194,6 +223,14 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			list[o] = true
 		}
 	}
+	allowHeaders := []string{"Authorization", "Content-Type", "Cache-Control", "X-Admin-Token", "X-Gateway-Cache",
+		"X-Gateway-No-Cache", "X-Gateway-Simulate", "X-Gateway-Strict-Model"}
+	for _, pc := range s.Config.Providers {
+		if !pc.Paid {
+			allowHeaders = append(allowHeaders, byokHeader(pc.Name))
+		}
+	}
+	allowHeadersStr := strings.Join(allowHeaders, ", ")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
@@ -204,9 +241,9 @@ func (s *Server) cors(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Add("Vary", "Origin")
 			}
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Admin-Token, X-Gateway-Cache, X-Gateway-Simulate, X-Provider-Key-Gemini, X-Provider-Key-Groq, X-Provider-Key-Openrouter, Cache-Control")
+			w.Header().Set("Access-Control-Allow-Headers", allowHeadersStr)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Expose-Headers", "Retry-After, X-Gateway-Provider, X-Gateway-Cache, X-Gateway-Latency-Ms, X-Gateway-Attempts, X-Gateway-Tried")
+			w.Header().Set("Access-Control-Expose-Headers", "Retry-After, X-Gateway-Provider, X-Gateway-Cache, X-Gateway-Latency-Ms, X-Gateway-Attempts, X-Gateway-Tried, X-Gateway-Model")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -247,7 +284,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		{ID: "fastest", Object: "model", OwnedBy: "gateway", Note: "try the provider with the lowest recent latency first"},
 	}
 	for _, e := range s.Router.Entries() {
-		out = append(out, model{ID: e.Name, Object: "model", OwnedBy: e.Name, Note: "only this provider (" + e.P.Model() + "), no fallback"})
+		note := "only this provider (" + e.P.Model() + "), no fallback"
+		if e.Paid {
+			note += "; paid, only for keys allowed to use it"
+		}
+		out = append(out, model{ID: e.Name, Object: "model", OwnedBy: e.Name, Note: note})
+	}
+	for _, m := range s.Router.Models() {
+		out = append(out, model{ID: m, Object: "model", OwnedBy: "provider",
+			Note: "falls back to other models unless you send X-Gateway-Strict-Model: true"})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": out})
 }

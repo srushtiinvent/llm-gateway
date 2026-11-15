@@ -50,8 +50,10 @@ func New(max int, ttl time.Duration) *Cache {
 	return &Cache{ttl: ttl, max: max, ll: list.New(), items: map[string]*list.Element{}, now: time.Now}
 }
 
-// Key makes the cache key for a request. `route` is the routing choice ("auto", "fastest" or a provider
-// name) so that asking for a specific provider does not return another provider's answer.
+// Key makes the cache key for a request. `route` is the routing choice ("auto", "fastest", a provider
+// name, or "model:<name>" in strict-model mode) so that asking for a specific provider or model does
+// not return another one's answer. Without strict mode any model may answer, so the model name itself
+// is not part of the key. Sampling settings (temperature, max_tokens, top_p) are.
 func Key(req *openai.ChatRequest, route string) string {
 	b, _ := json.Marshal(struct {
 		Route       string           `json:"r"`

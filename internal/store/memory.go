@@ -35,6 +35,7 @@ func (m *Memory) FindKeyByHash(_ context.Context, hash string) (*Key, error) {
 	for _, k := range m.keys {
 		if k.Hash == hash {
 			c := k
+			c.Providers = append([]string(nil), k.Providers...)
 			return &c, nil
 		}
 	}
@@ -53,6 +54,18 @@ func (m *Memory) RevokeKey(_ context.Context, id int64) error {
 	for i := range m.keys {
 		if m.keys[i].ID == id {
 			m.keys[i].Revoked = true
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (m *Memory) SetKeyProviders(_ context.Context, id int64, providers []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.keys {
+		if m.keys[i].ID == id {
+			m.keys[i].Providers = append([]string(nil), providers...)
 			return nil
 		}
 	}
@@ -92,7 +105,7 @@ func (m *Memory) CountProviderCalls(_ context.Context, keyID int64, since time.T
 	defer m.mu.Unlock()
 	n := 0
 	for _, l := range m.logs {
-		if l.KeyID == keyID && !l.CacheHit && !l.TS.Before(since) {
+		if l.KeyID == keyID && l.Billed && !l.TS.Before(since) {
 			n++
 		}
 	}

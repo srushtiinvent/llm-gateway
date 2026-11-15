@@ -7,6 +7,8 @@
 package quota
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,6 +18,56 @@ type Limits struct {
 	RPM int
 	RPD int
 	TPM int
+	// DailyReset, when set, makes the daily limit a calendar day that starts at a fixed
+	// time in the provider's own time zone (Google resets Gemini's free quota at midnight
+	// Pacific time). When nil, the daily limit is a rolling 24-hour window.
+	DailyReset *Reset
+}
+
+// Reset is a time of day in a time zone, such as 00:00 America/Los_Angeles.
+type Reset struct {
+	Hour, Minute int
+	Loc          *time.Location
+}
+
+// String formats the reset like "00:00 America/Los_Angeles".
+func (r *Reset) String() string {
+	if r == nil {
+		return "rolling 24h"
+	}
+	return fmt.Sprintf("%02d:%02d %s", r.Hour, r.Minute, r.Loc)
+}
+
+// ParseReset reads "HH:MM Zone/Name" (or just "Zone/Name" for midnight). Empty input returns nil.
+func ParseReset(s string) (*Reset, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.EqualFold(s, "rolling") {
+		return nil, nil
+	}
+	hm, zone, ok := strings.Cut(s, " ")
+	if !ok {
+		hm, zone = "00:00", s
+	}
+	var h, m int
+	if _, err := fmt.Sscanf(hm, "%d:%d", &h, &m); err != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return nil, fmt.Errorf("reset time %q: want HH:MM followed by a time zone, e.g. \"00:00 America/Los_Angeles\"", s)
+	}
+	loc, err := time.LoadLocation(strings.TrimSpace(zone))
+	if err != nil {
+		return nil, fmt.Errorf("reset time %q: unknown time zone: %w", s, err)
+	}
+	return &Reset{Hour: h, Minute: m, Loc: loc}, nil
+}
+
+// Window returns the start of the current quota day and the start of the next one.
+func (r *Reset) Window(now time.Time) (start, next time.Time) {
+	t := now.In(r.Loc)
+	start = time.Date(t.Year(), t.Month(), t.Day(), r.Hour, r.Minute, 0, 0, r.Loc)
+	if start.After(t) {
+		start = time.Date(t.Year(), t.Month(), t.Day()-1, r.Hour, r.Minute, 0, 0, r.Loc)
+	}
+	next = time.Date(start.Year(), start.Month(), start.Day()+1, r.Hour, r.Minute, 0, 0, r.Loc)
+	return start, next
 }
 
 type entry struct {
@@ -72,6 +124,64 @@ func (t *Tracker) windowStats(since time.Time) (reqs, tokens int, oldest time.Ti
 	return
 }
 
+// Peek reports whether a request of about estTokens tokens would be allowed right now,
+// without using any quota. nil means it would be allowed.
+func (t *Tracker) Peek(estTokens int) *Denial {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	t.prune(now)
+	return t.check(now, estTokens)
+}
+
+// check applies every limit. Caller holds the lock.
+func (t *Tracker) check(now time.Time, estTokens int) *Denial {
+	if now.Before(t.cooldown) {
+		return &Denial{Reason: "cooldown", RetryAfter: t.cooldown.Sub(now)}
+	}
+	if t.limits.RPM > 0 {
+		reqs, _, oldest := t.windowStats(now.Add(-time.Minute))
+		if reqs >= t.limits.RPM {
+			return &Denial{Reason: "rpm", RetryAfter: oldest.Add(time.Minute).Sub(now)}
+		}
+	}
+	if t.limits.TPM > 0 {
+		_, tokens, oldest := t.windowStats(now.Add(-time.Minute))
+		if tokens+estTokens > t.limits.TPM && tokens > 0 {
+			return &Denial{Reason: "tpm", RetryAfter: oldest.Add(time.Minute).Sub(now)}
+		}
+	}
+	if t.limits.RPD > 0 {
+		reqs, freesAt := t.daily(now)
+		if reqs >= t.limits.RPD {
+			return &Denial{Reason: "rpd", RetryAfter: freesAt.Sub(now)}
+		}
+	}
+	return nil
+}
+
+// daily counts requests in the current quota day and says when a slot frees up again:
+// the next reset for a calendar-day limit, or when the oldest call leaves a rolling window.
+// Caller holds the lock.
+func (t *Tracker) daily(now time.Time) (reqs int, freesAt time.Time) {
+	if r := t.limits.DailyReset; r != nil {
+		start, next := r.Window(now)
+		reqs, _, _ = t.windowStats(start.Add(-time.Nanosecond))
+		return reqs, next
+	}
+	reqs, _, oldest := t.windowStats(now.Add(-24 * time.Hour))
+	return reqs, oldest.Add(24 * time.Hour)
+}
+
+// NextDailyReset returns when the provider's daily quota resets, or the zero time for a rolling window.
+func (t *Tracker) NextDailyReset() time.Time {
+	if t.limits.DailyReset == nil {
+		return time.Time{}
+	}
+	_, next := t.limits.DailyReset.Window(t.now())
+	return next
+}
+
 // Reservation is a claim on quota taken before a call. Settle it with the real token
 // count when the call succeeds, or Cancel it if the call failed without using quota.
 type Reservation struct {
@@ -87,27 +197,8 @@ func (t *Tracker) Acquire(estTokens int) (*Reservation, *Denial) {
 	defer t.mu.Unlock()
 	now := t.now()
 	t.prune(now)
-
-	if now.Before(t.cooldown) {
-		return nil, &Denial{Reason: "cooldown", RetryAfter: t.cooldown.Sub(now)}
-	}
-	if t.limits.RPM > 0 {
-		reqs, _, oldest := t.windowStats(now.Add(-time.Minute))
-		if reqs >= t.limits.RPM {
-			return nil, &Denial{Reason: "rpm", RetryAfter: oldest.Add(time.Minute).Sub(now)}
-		}
-	}
-	if t.limits.TPM > 0 {
-		_, tokens, oldest := t.windowStats(now.Add(-time.Minute))
-		if tokens+estTokens > t.limits.TPM && tokens > 0 {
-			return nil, &Denial{Reason: "tpm", RetryAfter: oldest.Add(time.Minute).Sub(now)}
-		}
-	}
-	if t.limits.RPD > 0 {
-		reqs, _, oldest := t.windowStats(now.Add(-24 * time.Hour))
-		if reqs >= t.limits.RPD {
-			return nil, &Denial{Reason: "rpd", RetryAfter: oldest.Add(24 * time.Hour).Sub(now)}
-		}
+	if d := t.check(now, estTokens); d != nil {
+		return nil, d
 	}
 	e := &entry{t: now, tokens: estTokens}
 	t.entries = append(t.entries, e)
@@ -176,6 +267,10 @@ type Snapshot struct {
 	TPMLimit    int `json:"tpm_limit"`
 	CooldownSec int `json:"cooldown_sec"`  // > 0 when the provider told us to back off
 	ResetsInSec int `json:"resets_in_sec"` // seconds until the oldest request in the busiest window frees a slot
+	// DailyReset is when the daily count goes back to zero ("" for a rolling 24h window),
+	// and DailyResetRule is the configured rule, e.g. "00:00 America/Los_Angeles".
+	DailyReset     *time.Time `json:"daily_reset,omitempty"`
+	DailyResetRule string     `json:"daily_reset_rule"`
 }
 
 // Snapshot returns current usage.
@@ -185,11 +280,16 @@ func (t *Tracker) Snapshot() Snapshot {
 	now := t.now()
 	t.prune(now)
 	rpm, tpm, oldestMin := t.windowStats(now.Add(-time.Minute))
-	rpd, _, oldestDay := t.windowStats(now.Add(-24 * time.Hour))
+	rpd, dayFrees := t.daily(now)
 	s := Snapshot{
 		RPMUsed: rpm, RPMLimit: t.limits.RPM,
 		RPDUsed: rpd, RPDLimit: t.limits.RPD,
 		TPMUsed: tpm, TPMLimit: t.limits.TPM,
+		DailyResetRule: t.limits.DailyReset.String(),
+	}
+	if t.limits.DailyReset != nil {
+		u := dayFrees.UTC()
+		s.DailyReset = &u
 	}
 	if now.Before(t.cooldown) {
 		s.CooldownSec = int(t.cooldown.Sub(now).Round(time.Second) / time.Second)
@@ -197,7 +297,7 @@ func (t *Tracker) Snapshot() Snapshot {
 	// "resets in": for the daily limit when it is the tighter one, else the minute window.
 	switch {
 	case t.limits.RPD > 0 && rpd >= t.limits.RPD:
-		s.ResetsInSec = int(oldestDay.Add(24*time.Hour).Sub(now) / time.Second)
+		s.ResetsInSec = int(dayFrees.Sub(now) / time.Second)
 	case rpm > 0:
 		s.ResetsInSec = int(oldestMin.Add(time.Minute).Sub(now) / time.Second)
 	}

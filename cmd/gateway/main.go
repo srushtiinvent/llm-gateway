@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // reset times like "00:00 America/Los_Angeles" work even in images without zoneinfo
 
 	"github.com/srushtiinvent/llm-gateway/internal/auth"
 	"github.com/srushtiinvent/llm-gateway/internal/cache"
@@ -88,9 +89,10 @@ func run() error {
 		}
 		entries = append(entries, router.NewEntry(router.EntryConfig{
 			Provider:         p,
-			Limits:           quota.Limits{RPM: pc.RPM, RPD: pc.RPD, TPM: pc.TPM},
+			Limits:           quota.Limits{RPM: pc.RPM, RPD: pc.RPD, TPM: pc.TPM, DailyReset: pc.DailyReset},
 			MaxInputTokens:   pc.MaxInputTokens,
 			Mock:             pc.Mock,
+			Paid:             pc.Paid,
 			BreakerThreshold: cfg.BreakerThreshold,
 			BreakerOpenFor:   cfg.BreakerOpenFor,
 		}))
@@ -174,7 +176,11 @@ func banner(cfg *config.Config, st store.Store, tempAdmin bool) {
 		if p.Mock {
 			kind = "FAKE provider, no API key needed"
 		}
-		fmt.Printf("    - %-16s %s  (limits: %d/min, %d/day)\n", p.Name, kind, p.RPM, p.RPD)
+		extra := ""
+		if p.Paid {
+			extra = "  PAID: only keys whose provider rules list it"
+		}
+		fmt.Printf("    - %-16s %s  (limits: %d/min, %d/day, day resets: %s)%s\n", p.Name, kind, p.RPM, p.RPD, p.DailyReset, extra)
 	}
 	if tempAdmin {
 		fmt.Println()

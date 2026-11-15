@@ -63,12 +63,12 @@ func TestLogsAndStats(t *testing.T) {
 			ctx := context.Background()
 			now := time.Now()
 			logs := []RequestLog{
-				{TS: now.Add(-10 * time.Minute), KeyID: 1, Provider: "groq", Status: "ok", LatencyMs: 100, PromptTokens: 10, CompletionTokens: 20},
-				{TS: now.Add(-9 * time.Minute), KeyID: 1, Provider: "groq", Status: "ok", LatencyMs: 300, PromptTokens: 10, CompletionTokens: 20},
-				{TS: now.Add(-8 * time.Minute), KeyID: 1, Provider: "gemini", Status: "ok", LatencyMs: 200, PromptTokens: 5, CompletionTokens: 5},
+				{TS: now.Add(-10 * time.Minute), KeyID: 1, Provider: "groq", Status: "ok", LatencyMs: 100, PromptTokens: 10, CompletionTokens: 20, Billed: true},
+				{TS: now.Add(-9 * time.Minute), KeyID: 1, Provider: "groq", Status: "ok", LatencyMs: 300, PromptTokens: 10, CompletionTokens: 20, Billed: true},
+				{TS: now.Add(-8 * time.Minute), KeyID: 1, Provider: "gemini", Status: "ok", LatencyMs: 200, PromptTokens: 5, CompletionTokens: 5, Billed: true},
 				{TS: now.Add(-7 * time.Minute), KeyID: 1, Provider: "groq", Status: "ok", CacheHit: true, LatencyMs: 2, PromptTokens: 10, CompletionTokens: 20},
 				{TS: now.Add(-6 * time.Minute), KeyID: 2, Provider: "", Status: "error", LatencyMs: 50, Error: "all failed"},
-				{TS: now.Add(-3 * time.Hour), KeyID: 1, Provider: "groq", Status: "ok", LatencyMs: 999, PromptTokens: 1, CompletionTokens: 1},
+				{TS: now.Add(-3 * time.Hour), KeyID: 1, Provider: "groq", Status: "ok", LatencyMs: 999, PromptTokens: 1, CompletionTokens: 1, Billed: true},
 			}
 			for _, l := range logs {
 				if err := s.InsertLog(ctx, l); err != nil {
@@ -82,7 +82,7 @@ func TestLogsAndStats(t *testing.T) {
 			}
 
 			n, _ := s.CountProviderCalls(ctx, 1, now.Add(-time.Hour))
-			if n != 3 { // 3 real provider calls by key 1 in the last hour (cache hit and old row excluded)
+			if n != 3 { // 3 billed provider calls by key 1 in the last hour (cache hit and old row excluded)
 				t.Fatalf("CountProviderCalls = %d, want 3", n)
 			}
 

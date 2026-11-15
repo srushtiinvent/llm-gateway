@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq" // Postgres driver
@@ -44,7 +45,21 @@ CREATE TABLE IF NOT EXISTS request_logs (
 );
 CREATE INDEX IF NOT EXISTS request_logs_ts_idx ON request_logs (ts);
 CREATE INDEX IF NOT EXISTS request_logs_key_ts_idx ON request_logs (key_id, ts);
+ALTER TABLE api_keys     ADD COLUMN IF NOT EXISTS providers TEXT    NOT NULL DEFAULT '';
+ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS billed    BOOLEAN NOT NULL DEFAULT FALSE;
 `
+
+func joinProviders(p []string) string { return strings.Join(p, ",") }
+
+func splitProviders(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // NewPostgres connects and creates the tables if they do not exist yet.
 func NewPostgres(ctx context.Context, url string) (*Postgres, error) {
@@ -78,9 +93,10 @@ func (p *Postgres) CreateKey(ctx context.Context, name, prefix, hash string, rpm
 
 func (p *Postgres) FindKeyByHash(ctx context.Context, hash string) (*Key, error) {
 	var k Key
+	var provs string
 	err := p.db.QueryRowContext(ctx,
-		`SELECT id, name, prefix, rpm_limit, daily_limit, revoked, created_at FROM api_keys WHERE key_hash=$1`, hash).
-		Scan(&k.ID, &k.Name, &k.Prefix, &k.RPMLimit, &k.DailyLimit, &k.Revoked, &k.CreatedAt)
+		`SELECT id, name, prefix, rpm_limit, daily_limit, revoked, created_at, providers FROM api_keys WHERE key_hash=$1`, hash).
+		Scan(&k.ID, &k.Name, &k.Prefix, &k.RPMLimit, &k.DailyLimit, &k.Revoked, &k.CreatedAt, &provs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -88,12 +104,13 @@ func (p *Postgres) FindKeyByHash(ctx context.Context, hash string) (*Key, error)
 		return nil, err
 	}
 	k.Hash = hash
+	k.Providers = splitProviders(provs)
 	return &k, nil
 }
 
 func (p *Postgres) ListKeys(ctx context.Context) ([]Key, error) {
 	rows, err := p.db.QueryContext(ctx,
-		`SELECT id, name, prefix, rpm_limit, daily_limit, revoked, created_at FROM api_keys ORDER BY id`)
+		`SELECT id, name, prefix, rpm_limit, daily_limit, revoked, created_at, providers FROM api_keys ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -101,12 +118,25 @@ func (p *Postgres) ListKeys(ctx context.Context) ([]Key, error) {
 	var out []Key
 	for rows.Next() {
 		var k Key
-		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.RPMLimit, &k.DailyLimit, &k.Revoked, &k.CreatedAt); err != nil {
+		var provs string
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.RPMLimit, &k.DailyLimit, &k.Revoked, &k.CreatedAt, &provs); err != nil {
 			return nil, err
 		}
+		k.Providers = splitProviders(provs)
 		out = append(out, k)
 	}
 	return out, rows.Err()
+}
+
+func (p *Postgres) SetKeyProviders(ctx context.Context, id int64, providers []string) error {
+	res, err := p.db.ExecContext(ctx, `UPDATE api_keys SET providers=$2 WHERE id=$1`, id, joinProviders(providers))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (p *Postgres) RevokeKey(ctx context.Context, id int64) error {
@@ -126,10 +156,10 @@ func (p *Postgres) InsertLog(ctx context.Context, l RequestLog) error {
 	}
 	_, err := p.db.ExecContext(ctx,
 		`INSERT INTO request_logs (ts, key_id, provider, model, requested_model, status, cache_hit, stream,
-			latency_ms, prompt_tokens, completion_tokens, attempts, tried, error)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+			latency_ms, prompt_tokens, completion_tokens, attempts, tried, error, billed)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		l.TS, l.KeyID, l.Provider, l.Model, l.RequestedModel, l.Status, l.CacheHit, l.Stream,
-		l.LatencyMs, l.PromptTokens, l.CompletionTokens, l.Attempts, l.Tried, l.Error)
+		l.LatencyMs, l.PromptTokens, l.CompletionTokens, l.Attempts, l.Tried, l.Error, l.Billed)
 	return err
 }
 
@@ -139,7 +169,7 @@ func (p *Postgres) RecentLogs(ctx context.Context, limit int) ([]RequestLog, err
 	}
 	rows, err := p.db.QueryContext(ctx,
 		`SELECT id, ts, key_id, provider, model, requested_model, status, cache_hit, stream,
-			latency_ms, prompt_tokens, completion_tokens, attempts, tried, error
+			latency_ms, prompt_tokens, completion_tokens, attempts, tried, error, billed
 		 FROM request_logs ORDER BY id DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -149,7 +179,7 @@ func (p *Postgres) RecentLogs(ctx context.Context, limit int) ([]RequestLog, err
 	for rows.Next() {
 		var l RequestLog
 		if err := rows.Scan(&l.ID, &l.TS, &l.KeyID, &l.Provider, &l.Model, &l.RequestedModel, &l.Status, &l.CacheHit,
-			&l.Stream, &l.LatencyMs, &l.PromptTokens, &l.CompletionTokens, &l.Attempts, &l.Tried, &l.Error); err != nil {
+			&l.Stream, &l.LatencyMs, &l.PromptTokens, &l.CompletionTokens, &l.Attempts, &l.Tried, &l.Error, &l.Billed); err != nil {
 			return nil, err
 		}
 		out = append(out, l)
@@ -160,7 +190,7 @@ func (p *Postgres) RecentLogs(ctx context.Context, limit int) ([]RequestLog, err
 func (p *Postgres) CountProviderCalls(ctx context.Context, keyID int64, since time.Time) (int, error) {
 	var n int
 	err := p.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM request_logs WHERE key_id=$1 AND NOT cache_hit AND ts >= $2`, keyID, since).Scan(&n)
+		`SELECT count(*) FROM request_logs WHERE key_id=$1 AND billed AND ts >= $2`, keyID, since).Scan(&n)
 	return n, err
 }
 

@@ -24,8 +24,10 @@ App ──POST /v1/chat/completions──▶ 1. Who are you?        auth       (
                                    8. Reply with the answer + a "gateway" block
 ```
 
-If every provider fails the caller gets a clear error: `429` when free quotas are used up (with `Retry-After`),
-`503` when providers are down, `400` when the providers rejected the request itself.
+If every provider fails the caller gets a clear error: `503` with `error.type: no_provider_available` when
+free quotas are used up or providers are down (with `Retry-After` = the earliest expected recovery), `400`
+when the providers rejected the request itself. A `429` always means the caller's own gateway key hit a
+limit: `key_rate_limit` (per minute: wait and continue) or `key_daily_budget` (stop until 00:00 UTC).
 
 ## Code tour
 

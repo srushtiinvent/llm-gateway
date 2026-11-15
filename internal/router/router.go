@@ -47,6 +47,7 @@ type Entry struct {
 	Quota          *quota.Tracker
 	MaxInputTokens int
 	Mock           bool
+	Paid           bool // costs money: only routers built for keys that allow it include it
 
 	ok, fail atomic.Int64
 	ewmaBits atomic.Uint64 // moving average of latency in ms, stored as float64 bits
@@ -62,6 +63,7 @@ type EntryConfig struct {
 	Limits           quota.Limits
 	MaxInputTokens   int
 	Mock             bool
+	Paid             bool
 	BreakerThreshold int
 	BreakerOpenFor   time.Duration
 }
@@ -77,6 +79,7 @@ func NewEntry(c EntryConfig) *Entry {
 		Quota:          quota.New(c.Limits),
 		MaxInputTokens: c.MaxInputTokens,
 		Mock:           c.Mock,
+		Paid:           c.Paid,
 	}
 }
 
@@ -133,16 +136,50 @@ func (r *Router) Get(name string) (*Entry, bool) { e, ok := r.byName[name]; retu
 
 // Strategy says how to pick providers for one request.
 type Strategy struct {
-	Mode string // "auto", "fastest" or "pinned"
-	Pin  string // provider name when Mode is "pinned"
+	Mode  string // "auto", "fastest", "pinned" or "model"
+	Pin   string // provider name when Mode is "pinned"
+	Model string // exact model name when Mode is "model" (strict: no fallback to other models)
 }
 
 // Route is a short name used in cache keys and logs.
 func (s Strategy) Route() string {
-	if s.Mode == "pinned" {
+	switch s.Mode {
+	case "pinned":
 		return s.Pin
+	case "model":
+		return "model:" + s.Model
 	}
 	return s.Mode
+}
+
+// ResolveStrict is Resolve for callers that need exactly the model they asked for
+// (X-Gateway-Strict-Model: true). A provider name pins that provider; a model name uses only
+// the providers serving that model (in priority order). ok is false when nothing serves it.
+// "auto" and "fastest" mean "any model", so they stay as they are.
+func (r *Router) ResolveStrict(model string) (Strategy, bool) {
+	m := strings.ToLower(strings.TrimSpace(model))
+	switch m {
+	case "", "auto", "fastest":
+		return r.Resolve(m), true
+	}
+	if _, ok := r.byName[m]; ok {
+		return Strategy{Mode: "pinned", Pin: m}, true
+	}
+	st := Strategy{Mode: "model", Model: m}
+	return st, len(r.candidates(st)) > 0
+}
+
+// Models lists the distinct model names this router can serve, in priority order.
+func (r *Router) Models() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, e := range r.entries {
+		if m := strings.ToLower(e.P.Model()); !seen[m] {
+			seen[m] = true
+			out = append(out, e.P.Model())
+		}
+	}
+	return out
 }
 
 // Resolve turns the "model" field of a request into a Strategy:
@@ -166,7 +203,18 @@ func (r *Router) Resolve(model string) Strategy {
 func (r *Router) candidates(st Strategy) []*Entry {
 	switch st.Mode {
 	case "pinned":
-		return []*Entry{r.byName[st.Pin]}
+		if e, ok := r.byName[st.Pin]; ok {
+			return []*Entry{e}
+		}
+		return nil
+	case "model":
+		var c []*Entry
+		for _, e := range r.entries {
+			if strings.EqualFold(e.P.Model(), st.Model) {
+				c = append(c, e)
+			}
+		}
+		return c
 	case "fastest":
 		c := append([]*Entry(nil), r.entries...)
 		sort.SliceStable(c, func(i, j int) bool { return c[i].AvgLatencyMs() < c[j].AvgLatencyMs() }) // unknown (0) first, so every provider gets measured
@@ -363,6 +411,11 @@ func (r *Router) run(ctx context.Context, req *openai.ChatRequest, st Strategy, 
 				if d > r.opts.CooldownMax {
 					d = r.opts.CooldownMax
 				}
+				// The provider says the DAILY quota is gone: nothing will work until it resets,
+				// so rest until then (this also corrects our count after a restart).
+				if next := e.Quota.NextDailyReset(); perr.DailyQuota() && !next.IsZero() {
+					d = time.Until(next)
+				}
 				if !sim {
 					e.Quota.Cooldown(d) // the provider says we are over the limit: believe it
 				}
@@ -387,7 +440,7 @@ func (r *Router) run(ctx context.Context, req *openai.ChatRequest, st Strategy, 
 		finals = append(finals, final)
 	}
 
-	fe := &FailedError{Trace: tr, Last: lastErr, RetryAfter: minRetry, Pinned: st.Mode == "pinned", Kind: "unavailable"}
+	fe := &FailedError{Trace: tr, Last: lastErr, RetryAfter: minRetry, Pinned: st.Mode == "pinned" || st.Mode == "model", Kind: "unavailable"}
 	allBad, allQuota := len(finals) > 0, len(finals) > 0
 	for _, f := range finals {
 		allBad = allBad && f == "bad_request"
@@ -458,6 +511,7 @@ type ProviderStatus struct {
 	Name                string         `json:"name"`
 	Model               string         `json:"model"`
 	Mock                bool           `json:"mock"`
+	Paid                bool           `json:"paid"`
 	Breaker             string         `json:"breaker"` // closed, open, half_open
 	ConsecutiveFailures int            `json:"consecutive_failures"`
 	Trips               int            `json:"breaker_trips"`
@@ -477,7 +531,7 @@ func (r *Router) Snapshot() []ProviderStatus {
 	for _, e := range r.entries {
 		b := e.Breaker.Snapshot()
 		ps := ProviderStatus{
-			Name: e.Name, Model: e.P.Model(), Mock: e.Mock,
+			Name: e.Name, Model: e.P.Model(), Mock: e.Mock, Paid: e.Paid,
 			Breaker: b.State.String(), ConsecutiveFailures: b.Failures, Trips: b.Trips,
 			RetryInSec: int(b.RetryIn.Round(time.Second) / time.Second),
 			Quota:      e.Quota.Snapshot(),

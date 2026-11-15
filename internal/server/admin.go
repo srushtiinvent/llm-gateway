@@ -157,18 +157,93 @@ func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error", "keys_unavailable", "Could not read keys.", 0, nil)
 		return
 	}
-	if keys == nil {
-		keys = []store.Key{}
+	type keyView struct {
+		store.Key
+		DailyUsed      int `json:"daily_used"`      // provider calls billed today (UTC day)
+		DailyRemaining int `json:"daily_remaining"` // 0 when daily_limit is 0 (unlimited)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
+	out := make([]keyView, 0, len(keys))
+	for _, k := range keys {
+		v := keyView{Key: k}
+		if v.Providers == nil {
+			v.Providers = []string{}
+		}
+		if !k.Revoked {
+			if used, err := s.Budget.Usage(r.Context(), &k); err == nil {
+				v.DailyUsed = used
+			}
+		}
+		if k.DailyLimit > 0 {
+			v.DailyRemaining = max(0, k.DailyLimit-v.DailyUsed)
+		}
+		out = append(out, v)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": out})
+}
+
+// checkProviders validates a key's provider rules: known names, no duplicates.
+func (s *Server) checkProviders(list []string) ([]string, string) {
+	var out []string
+	seen := map[string]bool{}
+	for _, n := range list {
+		n = strings.ToLower(strings.TrimSpace(n))
+		if n == "" || seen[n] {
+			continue
+		}
+		if _, ok := s.Router.Get(n); !ok {
+			names := []string{}
+			for _, e := range s.Router.Entries() {
+				names = append(names, e.Name)
+			}
+			return nil, "Unknown provider " + strconv.Quote(n) + ". This gateway has: " + strings.Join(names, ", ") + "."
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out, ""
+}
+
+// POST /admin/keys/{id}/providers   body: {"providers":["groq","gemini"]}  ([] = default order, free providers only)
+func (s *Server) handleKeyProviders(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_id", "Key id must be a number.", 0, nil)
+		return
+	}
+	var body struct {
+		Providers []string `json:"providers"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_json", "Body must be like {\"providers\":[\"groq\",\"gemini\"]}.", 0, nil)
+		return
+	}
+	provs, msg := s.checkProviders(body.Providers)
+	if msg != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "unknown_provider", msg, 0, nil)
+		return
+	}
+	if err := s.Store.SetKeyProviders(r.Context(), id, provs); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "invalid_request_error", "unknown_key", "No such key.", 0, nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "server_error", "update_failed", "Could not update the key.", 0, nil)
+		return
+	}
+	s.Auth.Forget()
+	if provs == nil {
+		provs = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "providers": provs})
 }
 
 // POST /admin/keys   body: {"name":"my-app","rpm":20,"daily":500}
 func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name  string `json:"name"`
-		RPM   *int   `json:"rpm"`
-		Daily *int   `json:"daily"`
+		Name      string   `json:"name"`
+		RPM       *int     `json:"rpm"`
+		Daily     *int     `json:"daily"`
+		Providers []string `json:"providers"` // optional: providers this key may use, in order
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_json", "Body must be like {\"name\":\"my-app\"}.", 0, nil)
@@ -190,17 +265,29 @@ func (s *Server) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_limit", "'rpm' and 'daily' cannot be negative (0 = unlimited).", 0, nil)
 		return
 	}
+	provs, msg := s.checkProviders(body.Providers)
+	if msg != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "unknown_provider", msg, 0, nil)
+		return
+	}
 	plain, prefix, hash := auth.GenerateKey()
 	k, err := s.Store.CreateKey(r.Context(), name, prefix, hash, rpm, daily)
+	if err == nil && len(provs) > 0 {
+		err = s.Store.SetKeyProviders(r.Context(), k.ID, provs)
+	}
 	if err != nil {
 		s.Logger.Error("create key failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "server_error", "key_not_created", "Could not create the key.", 0, nil)
 		return
 	}
+	if provs == nil {
+		provs = []string{}
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"key":  plain,
 		"note": "Copy this key now. It is shown only once and cannot be recovered.",
 		"id":   k.ID, "name": k.Name, "prefix": k.Prefix, "rpm_limit": k.RPMLimit, "daily_limit": k.DailyLimit,
+		"providers": provs,
 	})
 }
 

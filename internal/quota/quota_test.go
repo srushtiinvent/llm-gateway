@@ -110,3 +110,58 @@ func TestUnlimitedNeverDenies(t *testing.T) {
 		}
 	}
 }
+
+func TestDailyResetAtFixedTimeInProviderZone(t *testing.T) {
+	r, err := ParseReset("00:00 America/Los_Angeles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt := r.Loc
+	// 23:00 Pacific on Nov 14 = 12:30 IST Nov 15: still the Nov 14 quota day.
+	now := time.Date(2026, 11, 14, 23, 0, 0, 0, pt)
+	tr := New(Limits{RPD: 2, DailyReset: r})
+	tr.now = func() time.Time { return now }
+	tr.Acquire(1)
+	tr.Acquire(1)
+	_, d := tr.Acquire(1)
+	if d == nil || d.Reason != "rpd" || d.RetryAfter != time.Hour {
+		t.Fatalf("want rpd denial until Pacific midnight (1h), got %+v", d)
+	}
+	if got := tr.NextDailyReset(); !got.Equal(time.Date(2026, 11, 15, 0, 0, 0, 0, pt)) {
+		t.Fatalf("next reset = %v", got)
+	}
+	// One minute after Pacific midnight the quota is fresh, although the calls were < 24h ago.
+	now = now.Add(61 * time.Minute)
+	if _, d := tr.Acquire(1); d != nil {
+		t.Fatalf("new quota day should allow requests, got %+v", d)
+	}
+	if s := tr.Snapshot(); s.RPDUsed != 1 || s.DailyReset == nil || s.DailyResetRule != "00:00 America/Los_Angeles" {
+		t.Fatalf("snapshot: %+v", s)
+	}
+}
+
+func TestParseReset(t *testing.T) {
+	for _, ok := range []string{"", "rolling", "UTC", "05:30 Asia/Kolkata", "0:00 America/Los_Angeles"} {
+		if _, err := ParseReset(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"25:00 UTC", "00:00 Mars/Olympus", "noon UTC"} {
+		if _, err := ParseReset(bad); err == nil {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+}
+
+func TestPeekDoesNotUseQuota(t *testing.T) {
+	tr, _ := newClock(Limits{RPM: 1})
+	for i := 0; i < 3; i++ {
+		if d := tr.Peek(10); d != nil {
+			t.Fatalf("peek %d: %+v", i, d)
+		}
+	}
+	tr.Acquire(10)
+	if d := tr.Peek(10); d == nil || d.Reason != "rpm" {
+		t.Fatalf("after the one request: %+v", d)
+	}
+}

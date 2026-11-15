@@ -383,3 +383,37 @@ func TestStreamMidwayFailureCountsAgainstProvider(t *testing.T) {
 		t.Fatal("Finish must only count once")
 	}
 }
+
+// When the provider says its DAILY quota is gone, rest it until the configured reset time
+// (not just a minute, and not capped at CooldownMax).
+func TestDailyQuota429RestsUntilReset(t *testing.T) {
+	a := &fake{name: "a", fn: func(int, *openai.ChatRequest) (*openai.ChatResponse, error) {
+		return nil, &provider.Error{Provider: "a", Kind: provider.KindRateLimited, Status: 429, RetryAfter: 30 * time.Second,
+			Message: "Quota exceeded for metric: GenerateRequestsPerDayPerProjectPerModel-FreeTier"}
+	}}
+	reset, _ := quota.ParseReset("UTC")
+	ea := entry(a, quota.Limits{DailyReset: reset}, 0)
+	r := testRouter(ea, entry(always("b"), quota.Limits{}, 0))
+	r.Chat(context.Background(), userReq("one"), r.Resolve("auto"))
+	cd := ea.Quota.Snapshot().CooldownSec
+	want := int(time.Until(ea.Quota.NextDailyReset()).Seconds())
+	if cd < want-5 || cd > want+5 {
+		t.Fatalf("cooldown %ds, want about %ds (until the daily reset)", cd, want)
+	}
+}
+
+func TestStrictModelUsesOnlyMatchingProviders(t *testing.T) {
+	a, b := always("a"), always("b")
+	r := testRouter(entry(a, quota.Limits{}, 0), entry(b, quota.Limits{}, 0))
+	st, ok := r.ResolveStrict("B-MODEL")
+	if !ok || st.Mode != "model" {
+		t.Fatalf("strict: %+v %v", st, ok)
+	}
+	_, tr, err := r.Chat(context.Background(), userReq("x"), st)
+	if err != nil || tr.Provider != "b" || a.calls.Load() != 0 {
+		t.Fatalf("err=%v provider=%s a.calls=%d", err, tr.Provider, a.calls.Load())
+	}
+	if _, ok := r.ResolveStrict("gpt-4o"); ok {
+		t.Fatal("nobody serves gpt-4o")
+	}
+}
