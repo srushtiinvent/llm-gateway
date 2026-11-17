@@ -181,6 +181,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if headerTrue(r, "X-Gateway-No-Trim") {
+		st.NoTrim = true
+	}
+
 	lg := store.RequestLog{KeyID: key.ID, RequestedModel: req.Model, Stream: req.Stream, Status: "ok"}
 	defer func() {
 		lg.LatencyMs = time.Since(start).Milliseconds()
@@ -215,7 +219,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			wait, map[string]any{"limit_per_minute": rpm, "retry_after_sec": int(math.Ceil(wait.Seconds()))})
 		return
 	}
-	if !byok && !s.Budget.Allow(ctx, key) {
+	// The budget is reserved now and given back if no provider answers, so requests arriving
+	// together cannot overshoot the daily limit.
+	if !byok && !s.Budget.Reserve(ctx, key) {
 		lg.Status, lg.Error = "error", "daily_budget_exceeded"
 		extra := map[string]any{"daily_limit": key.DailyLimit, "resets_at": nextUTCMidnight().Format(time.RFC3339)}
 		if strings.HasPrefix(key.Name, visitorKeyPrefix) {
@@ -228,6 +234,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("This key has used its daily budget (%d requests answered by a provider). It resets at 00:00 UTC. Repeated questions answered from the cache are free.", key.DailyLimit),
 			untilUTCMidnight(), extra)
 		return
+	}
+
+	if !byok {
+		defer func() {
+			if !lg.Billed { // no provider answered: the reservation goes back
+				s.Budget.Refund(key)
+			}
+		}()
 	}
 
 	// 4. wait for a free slot (or be told to come back later)
@@ -264,8 +278,7 @@ func (s *Server) chatOnce(w http.ResponseWriter, r *http.Request, req *openai.Ch
 		return
 	}
 	if !ri.byok { // a provider answered on the site's own keys: this is what the daily budget counts
-		s.Budget.Used(key)
-		lg.Billed = true
+		lg.Billed = true // keeps the budget reserved in handleChat
 	}
 
 	if resp.Usage.PromptTokens == 0 && resp.Usage.CompletionTokens == 0 { // provider did not report usage
@@ -317,8 +330,7 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, req *openai.
 		return
 	}
 	if !ri.byok {
-		s.Budget.Used(key)
-		lg.Billed = true
+		lg.Billed = true // keeps the budget reserved in handleChat
 	}
 	lg.Provider, lg.Model = tr.Provider, tr.Model
 
@@ -420,6 +432,7 @@ func (s *Server) serveCached(w http.ResponseWriter, req *openai.ChatRequest, hit
 		resp.ID, resp.Object, resp.Created = openai.NewID(), "chat.completion", openai.Now()
 		resp.Gateway = info
 		gatewayHeaders(w, info)
+		w.Header().Set("X-Gateway-Model", resp.Model)
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -427,6 +440,7 @@ func (s *Server) serveCached(w http.ResponseWriter, req *openai.ChatRequest, hit
 	// Streaming client, cached answer: replay it as a short stream so the client code works unchanged.
 	gatewayHeaders(w, info)
 	h := w.Header()
+	h.Set("X-Gateway-Model", resp.Model)
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -458,6 +472,11 @@ func (s *Server) writeRouteError(w http.ResponseWriter, ctx context.Context, err
 		if fe.Kind == "bad_request" {
 			writeError(w, http.StatusBadRequest, "invalid_request_error", "provider_rejected_request",
 				"The AI provider rejected this request: "+fe.Last.Message, 0, extra)
+			return
+		}
+		if fe.Kind == "context_too_small" {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "context_too_small",
+				"The conversation is too long for every provider available to this key, and X-Gateway-No-Trim is on, so the gateway will not drop messages to make it fit. Shorten the conversation or remove the header.", 0, extra)
 			return
 		}
 		// Out of quota, paused by the circuit breaker, or failing: either way no provider can

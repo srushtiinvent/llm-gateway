@@ -417,3 +417,79 @@ func TestStrictModelUsesOnlyMatchingProviders(t *testing.T) {
 		t.Fatal("nobody serves gpt-4o")
 	}
 }
+
+func TestModelNameIsTriedFirstThenFallsBack(t *testing.T) {
+	a, b := always("a"), always("b")
+	r := testRouter(entry(a, quota.Limits{}, 0), entry(b, quota.Limits{RPM: 1}, 0))
+	st := r.Resolve("B-Model") // case-insensitive
+	if st.Mode != "prefer" || st.Route() != "prefer:b-model" {
+		t.Fatalf("strategy %+v route %s", st, st.Route())
+	}
+	if _, tr, err := r.Chat(context.Background(), userReq("hi"), st); err != nil || tr.Provider != "b" || a.calls.Load() != 0 {
+		t.Fatalf("want b first: err=%v trace=%v", err, tr.Summary())
+	}
+	// b is now out of per-minute quota: the request falls back to a
+	_, tr, err := r.Chat(context.Background(), userReq("hi"), st)
+	if err != nil || !reflect.DeepEqual(tr.Summary(), []string{"b:skipped_quota_rpm", "a:ok"}) {
+		t.Fatalf("want fallback to a: err=%v trace=%v", err, tr.Summary())
+	}
+	if r.Resolve("gpt-4o").Mode != "auto" || r.Resolve("auto").Mode != "auto" || r.Resolve("a").Mode != "pinned" {
+		t.Fatal("unknown models stay auto, provider names stay pinned")
+	}
+}
+
+// A text-to-SQL repair conversation: the schema and question are the OLDEST user message.
+func repairConversation() *openai.ChatRequest {
+	return &openai.ChatRequest{Messages: []openai.Message{
+		{Role: "system", Content: "You write SQL."},
+		{Role: "user", Content: "Schema: " + strings.Repeat("CREATE TABLE t (a INT); ", 400) + "Question: how many rows?"},
+		{Role: "assistant", Content: "SELECT COUNT(*) FROM tt"},
+		{Role: "user", Content: "That failed: no such table tt. Fix it."},
+	}}
+}
+
+func TestProviderThatFitsGoesBeforeOneThatWouldTrim(t *testing.T) {
+	small, big := always("small"), always("big")
+	r := testRouter(entry(small, quota.Limits{}, 500), entry(big, quota.Limits{}, 100000))
+	_, tr, err := r.Chat(context.Background(), repairConversation(), r.Resolve("auto"))
+	if err != nil || tr.Provider != "big" || tr.Trimmed != 0 || small.calls.Load() != 0 {
+		t.Fatalf("want big, untrimmed: err=%v trace=%v trimmed=%d", err, tr.Summary(), tr.Trimmed)
+	}
+	// a short conversation still goes to the first provider in priority order
+	if _, tr, _ := r.Chat(context.Background(), userReq("hi"), r.Resolve("auto")); tr.Provider != "small" {
+		t.Fatalf("priority order must hold when everything fits: %v", tr.Summary())
+	}
+}
+
+func TestNoTrimSkipsSmallProviders(t *testing.T) {
+	small, big := always("small"), failing("big", provider.KindServer, 503)
+	r := testRouter(entry(small, quota.Limits{}, 500), entry(big, quota.Limits{}, 100000))
+
+	// default: big fails, so small answers with the question trimmed away
+	_, tr, err := r.Chat(context.Background(), repairConversation(), r.Resolve("auto"))
+	if err != nil || tr.Provider != "small" || tr.Trimmed == 0 {
+		t.Fatalf("default should fall back and trim: err=%v trace=%v", err, tr.Summary())
+	}
+
+	// no-trim: small is skipped, the request fails rather than lose the question
+	st := r.Resolve("auto")
+	st.NoTrim = true
+	before := small.calls.Load()
+	_, tr, err = r.Chat(context.Background(), repairConversation(), st)
+	if err == nil || small.calls.Load() != before || !strings.Contains(strings.Join(tr.Summary(), ","), "small:skipped_context_too_small") {
+		t.Fatalf("no-trim must skip small: err=%v trace=%v", err, tr.Summary())
+	}
+	if st.Route() == r.Resolve("auto").Route() {
+		t.Fatal("no-trim requests need their own cache route")
+	}
+
+	// no provider is big enough at all: a clear, non-retryable error kind
+	only := testRouter(entry(always("tiny"), quota.Limits{}, 500))
+	st = only.Resolve("auto")
+	st.NoTrim = true
+	_, _, err = only.Chat(context.Background(), repairConversation(), st)
+	var fe *FailedError
+	if !errors.As(err, &fe) || fe.Kind != "context_too_small" {
+		t.Fatalf("want context_too_small, got %v", err)
+	}
+}

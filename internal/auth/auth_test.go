@@ -102,3 +102,27 @@ func TestBudget(t *testing.T) {
 		t.Fatal("usage must survive a restart (read back from the log)")
 	}
 }
+
+func TestBudgetReserveAndRefund(t *testing.T) {
+	ctx := context.Background()
+	b := NewBudget(store.NewMemory())
+	k := &store.Key{ID: 42, DailyLimit: 2}
+	if !b.Reserve(ctx, k) || !b.Reserve(ctx, k) {
+		t.Fatal("two reservations fit a budget of 2")
+	}
+	if b.Reserve(ctx, k) {
+		t.Fatal("third reservation must be refused")
+	}
+	b.Refund(k)
+	if !b.Reserve(ctx, k) {
+		t.Fatal("a refunded slot can be reserved again")
+	}
+	if n, _ := b.Usage(ctx, k); n != 2 {
+		t.Fatalf("usage %d, want 2", n)
+	}
+	unlimited := &store.Key{ID: 43}
+	b.Refund(unlimited)
+	if !b.Reserve(ctx, unlimited) {
+		t.Fatal("no limit means always allowed")
+	}
+}

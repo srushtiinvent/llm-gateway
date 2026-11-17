@@ -130,10 +130,14 @@ func TestStrictModel(t *testing.T) {
 	key := h.newKey("app", 0, 0)
 	strict := map[string]string{"X-Gateway-Strict-Model": "true"}
 
-	// without strict mode a model name is a preference: the first provider answers
+	// without strict mode a model name is a preference: the provider serving it is tried first
 	_, out := h.chat(key, "beta-model", "q1", nil)
-	if out.Gateway.Provider != "alpha" || out.Model != "alpha-model" {
+	if out.Gateway.Provider != "beta" || out.Model != "beta-model" {
 		t.Fatalf("non-strict: %+v model=%s", out.Gateway, out.Model)
+	}
+	// ...a model nobody here serves is plain "auto"
+	if _, out := h.chat(key, "gpt-4o", "q1b", nil); out.Gateway.Provider != "alpha" {
+		t.Fatalf("unknown model: %+v", out.Gateway)
 	}
 	// strict: only the provider serving that model
 	_, out = h.chat(key, "beta-model", "q2", strict)
@@ -145,6 +149,11 @@ func TestStrictModel(t *testing.T) {
 	resp, out := h.chat(key, "beta-model", "q3", strict)
 	if resp.StatusCode != 503 || out.Error.Type != "no_provider_available" || strings.Contains(strings.Join(out.Gateway.Tried, ","), "alpha") {
 		t.Fatalf("strict with provider down: %d %+v %v", resp.StatusCode, out.Error, out.Gateway.Tried)
+	}
+	// not strict and that provider is down: falls back to another model, and says so
+	resp, out = h.chat(key, "beta-model", "q3b", nil)
+	if resp.StatusCode != 200 || out.Gateway.Provider != "alpha" || out.Model != "alpha-model" || resp.Header.Get("X-Gateway-Model") != "alpha-model" {
+		t.Fatalf("preferred provider down: %d %+v model=%s", resp.StatusCode, out.Gateway, out.Model)
 	}
 	// strict and nobody serves it
 	resp, out = h.chat(key, "gpt-4o", "q4", strict)
@@ -259,4 +268,55 @@ func mustReq(key string) *http.Request {
 	r, _ := http.NewRequest("GET", "/", nil)
 	r.Header.Set("Authorization", "Bearer "+key)
 	return r
+}
+
+// Requests that arrive together must not overshoot the daily budget: it is reserved before the
+// provider is asked and given back when no provider answers.
+func TestDailyBudgetHoldsUnderConcurrency(t *testing.T) {
+	h := newHarness(t, hopts{})
+	key := h.newKey("burst", 0, 3)
+	codes := make(chan int, 10)
+	for i := 0; i < 10; i++ {
+		go func(i int) {
+			resp, _ := h.chat(key, "auto", fmt.Sprintf("burst question %d", i), nil)
+			codes <- resp.StatusCode
+		}(i)
+	}
+	ok := 0
+	for i := 0; i < 10; i++ {
+		if c := <-codes; c == 200 {
+			ok++
+		} else if c != 429 {
+			t.Fatalf("unexpected status %d", c)
+		}
+	}
+	if used, _ := h.usage(key); ok != 3 || used != 3 {
+		t.Fatalf("answered %d, used %d; want exactly 3 and 3", ok, used)
+	}
+}
+
+func TestBudgetIsRefundedWhenNoProviderAnswers(t *testing.T) {
+	h := newHarness(t, hopts{})
+	key := h.newKey("refund", 0, 2)
+	for _, n := range []string{"alpha", "beta", "gamma"} {
+		h.fault(n, "down")
+	}
+	for i := 0; i < 4; i++ {
+		if resp, _ := h.chat(key, "auto", fmt.Sprintf("down %d", i), nil); resp.StatusCode != 503 {
+			t.Fatalf("want 503 while providers are down, got %d", resp.StatusCode)
+		}
+	}
+	if used, left := h.usage(key); used != 0 || left != 2 {
+		t.Fatalf("failed requests must not use budget: used=%d left=%d", used, left)
+	}
+}
+
+func TestCachedAnswerCarriesModelHeader(t *testing.T) {
+	h := newHarness(t, hopts{})
+	key := h.newKey("hdr", 0, 0)
+	h.chat(key, "auto", "same question", nil)
+	resp, out := h.chat(key, "auto", "same question", nil)
+	if out.Gateway.Cache != "hit" || resp.Header.Get("X-Gateway-Model") != "alpha-model" {
+		t.Fatalf("cache=%s model header=%q", out.Gateway.Cache, resp.Header.Get("X-Gateway-Model"))
+	}
 }

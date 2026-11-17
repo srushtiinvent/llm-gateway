@@ -144,7 +144,8 @@ The `model` field chooses the routing:
 | `auto` (or anything unknown, like `gpt-4o`) | try providers in priority order, with fallback |
 | `fastest` | try the provider with the lowest recent latency first |
 | a provider name (`gemini`, `groq`...) | use only that provider, no fallback |
-| a real model name (`openai/gpt-oss-20b`) | a preference only: like `auto`, any model may answer, unless you send `X-Gateway-Strict-Model: true` |
+| a model name a provider here serves (`openai/gpt-oss-20b`) | a preference: the provider(s) serving that model are tried first, then the others as fallback. Send `X-Gateway-Strict-Model: true` to forbid the fallback |
+| any other model name (`gpt-4o`) | same as `auto` |
 
 The response's `model` field (and the `X-Gateway-Model` header) is always the model that really answered.
 
@@ -159,6 +160,7 @@ Send `"stream": true` for server-sent events.
 | Header | Effect |
 |---|---|
 | `X-Gateway-No-Cache: true` (or `X-Gateway-Cache: bypass`) | do not read or write the cache for this request |
+| `X-Gateway-No-Trim: true` | never drop old messages to fit a smaller model: providers whose context is too small are skipped, and the request fails with `context_too_small` if none fits |
 | `X-Gateway-Strict-Model: true` | answer only with the model named in `model`; return an error instead of falling back to another model |
 | `X-Provider-Key-Groq: gsk_...` (also `-Gemini`, `-Openrouter`, `-Cerebras`, `-Mistral`) | use the caller's own provider key for this one request: works for any gateway key over the API, runs on the caller's provider quota, is not counted against the key's daily budget, and is never stored or logged |
 

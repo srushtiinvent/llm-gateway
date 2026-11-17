@@ -136,20 +136,29 @@ func (r *Router) Get(name string) (*Entry, bool) { e, ok := r.byName[name]; retu
 
 // Strategy says how to pick providers for one request.
 type Strategy struct {
-	Mode  string // "auto", "fastest", "pinned" or "model"
+	Mode  string // "auto", "fastest", "pinned", "prefer" or "model"
 	Pin   string // provider name when Mode is "pinned"
-	Model string // exact model name when Mode is "model" (strict: no fallback to other models)
+	Model string // model name when Mode is "prefer" (try it first, then fall back) or "model" (strict: no fallback)
+	// NoTrim skips providers whose context is too small for the whole conversation instead of
+	// dropping old messages to make it fit (X-Gateway-No-Trim: true).
+	NoTrim bool
 }
 
 // Route is a short name used in cache keys and logs.
 func (s Strategy) Route() string {
+	route := s.Mode
 	switch s.Mode {
 	case "pinned":
-		return s.Pin
+		route = s.Pin
 	case "model":
-		return "model:" + s.Model
+		route = "model:" + s.Model
+	case "prefer":
+		route = "prefer:" + s.Model
 	}
-	return s.Mode
+	if s.NoTrim {
+		route += "|notrim" // an answer made from a trimmed conversation is never served to a no-trim caller
+	}
+	return route
 }
 
 // ResolveStrict is Resolve for callers that need exactly the model they asked for
@@ -186,6 +195,7 @@ func (r *Router) Models() []string {
 //
 //	"fastest"          -> try the provider with the lowest recent latency first
 //	a provider's name  -> use ONLY that provider (no fallback)
+//	a model we serve   -> "prefer": try the provider(s) serving that model first, then fall back
 //	anything else      -> "auto": try providers in priority order, with fallback
 //
 // Treating unknown model names as "auto" means existing apps that send "gpt-4o" still work.
@@ -196,6 +206,9 @@ func (r *Router) Resolve(model string) Strategy {
 	}
 	if _, ok := r.byName[m]; ok {
 		return Strategy{Mode: "pinned", Pin: m}
+	}
+	if m != "" && m != "auto" && len(r.candidates(Strategy{Mode: "model", Model: m})) > 0 {
+		return Strategy{Mode: "prefer", Model: m}
 	}
 	return Strategy{Mode: "auto"}
 }
@@ -215,6 +228,16 @@ func (r *Router) candidates(st Strategy) []*Entry {
 			}
 		}
 		return c
+	case "prefer":
+		var first, rest []*Entry
+		for _, e := range r.entries {
+			if strings.EqualFold(e.P.Model(), st.Model) {
+				first = append(first, e)
+			} else {
+				rest = append(rest, e)
+			}
+		}
+		return append(first, rest...)
 	case "fastest":
 		c := append([]*Entry(nil), r.entries...)
 		sort.SliceStable(c, func(i, j int) bool { return c[i].AvgLatencyMs() < c[j].AvgLatencyMs() }) // unknown (0) first, so every provider gets measured
@@ -258,7 +281,7 @@ func (t *Trace) Summary() []string {
 type FailedError struct {
 	Trace      *Trace
 	Last       *provider.Error
-	Kind       string        // "bad_request", "quota_exhausted" or "unavailable"
+	Kind       string        // "bad_request", "quota_exhausted", "context_too_small" or "unavailable"
 	RetryAfter time.Duration // suggested wait (0 = unknown)
 	Pinned     bool
 }
@@ -336,9 +359,21 @@ func (r *Router) run(ctx context.Context, req *openai.ChatRequest, st Strategy, 
 	}
 	var finals []string // one verdict per provider: "quota", "bad_request" or "other"
 
-	for _, e := range r.candidates(st) {
+	// Providers that can take the whole conversation go first (order otherwise unchanged), so
+	// messages are only dropped when no provider is big enough.
+	cands := append([]*Entry(nil), r.candidates(st)...)
+	need := req.EstimatePromptTokens()
+	fits := func(e *Entry) bool { return e.MaxInputTokens <= 0 || need <= e.MaxInputTokens }
+	sort.SliceStable(cands, func(i, j int) bool { return fits(cands[i]) && !fits(cands[j]) })
+
+	for _, e := range cands {
 		rq, dropped := trim(req, e.MaxInputTokens)
 		final := "other"
+		if st.NoTrim && !fits(e) { // the caller would rather fail than lose part of the conversation
+			tr.add(e.Name, "skipped_context_too_small")
+			finals = append(finals, "context")
+			continue
+		}
 
 		for attempt := 0; attempt <= r.opts.MaxRetries; attempt++ {
 			if attempt == 0 && !e.Breaker.Allow() { // circuit open: do not even try
@@ -441,12 +476,15 @@ func (r *Router) run(ctx context.Context, req *openai.ChatRequest, st Strategy, 
 	}
 
 	fe := &FailedError{Trace: tr, Last: lastErr, RetryAfter: minRetry, Pinned: st.Mode == "pinned" || st.Mode == "model", Kind: "unavailable"}
-	allBad, allQuota := len(finals) > 0, len(finals) > 0
+	allBad, allQuota, allSmall := len(finals) > 0, len(finals) > 0, len(finals) > 0
 	for _, f := range finals {
 		allBad = allBad && f == "bad_request"
 		allQuota = allQuota && f == "quota"
+		allSmall = allSmall && f == "context"
 	}
 	switch {
+	case allSmall:
+		fe.Kind = "context_too_small"
 	case allBad:
 		fe.Kind = "bad_request"
 	case allQuota:

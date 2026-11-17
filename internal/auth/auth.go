@@ -161,6 +161,53 @@ func (b *Budget) Allow(ctx context.Context, k *store.Key) bool {
 	return d.n < k.DailyLimit
 }
 
+// Reserve takes one unit of today's budget before a provider is asked, so requests that
+// arrive together cannot all pass the check and overshoot the limit. Call Refund if no
+// provider answers. Returns false when the budget is used up.
+func (b *Budget) Reserve(ctx context.Context, k *store.Key) bool {
+	if k.DailyLimit <= 0 {
+		return true
+	}
+	date, start := today()
+	b.mu.Lock()
+	d := b.days[k.ID]
+	b.mu.Unlock()
+	if d == nil || d.date != date {
+		n, err := b.store.CountProviderCalls(ctx, k.ID, start)
+		if err != nil {
+			return true // do not block users because the database hiccuped
+		}
+		b.mu.Lock()
+		if cur := b.days[k.ID]; cur != nil && cur.date == date {
+			d = cur // another request loaded it meanwhile; keep its reservations
+		} else {
+			d = &day{date: date, n: n}
+			b.days[k.ID] = d
+		}
+		b.mu.Unlock()
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if d.n >= k.DailyLimit {
+		return false
+	}
+	d.n++
+	return true
+}
+
+// Refund gives back a reservation whose request was not answered by a provider.
+func (b *Budget) Refund(k *store.Key) {
+	if k.DailyLimit <= 0 {
+		return
+	}
+	date, _ := today()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if d := b.days[k.ID]; d != nil && d.date == date && d.n > 0 {
+		d.n--
+	}
+}
+
 // Used records one provider call for the key.
 func (b *Budget) Used(k *store.Key) {
 	date, _ := today()
