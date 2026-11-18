@@ -1,9 +1,22 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import sceneSvg from '../lib/scene.svg?raw';
 import { T, reduceMotion } from '../lib/fx.js';
+import { provColor } from '../lib/providers.js';
 
 const NS = 'http://www.w3.org/2000/svg';
-const LET = { gemini: 'G', groq: 'Q' };
+
+// Hangar geometry inside the 900x440 scene. One hangar per provider, stacked down the
+// right-hand side, so the picture grows with however many providers are configured.
+const HANGAR = { x: 700, w: 170, h: 82, hubX: 506, hubY: 225, top: 70, bottom: 352 };
+export const laneId = name => 'lane-' + String(name).replace(/[^a-zA-Z0-9]/g, '-');
+const hangarId = name => 'h-' + String(name).replace(/[^a-zA-Z0-9]/g, '-');
+
+/** Vertical centre of hangar i of n, spread evenly between top and bottom. */
+function centreY(i, n) {
+  const { top, bottom } = HANGAR;
+  if (n <= 1) return (top + bottom) / 2;
+  return top + ((bottom - top) * i) / (n - 1);
+}
 
 // The animated air-traffic scene (SVG). `providers` colours the hangars; the ref gives Play the
 // animation tools: fly(laneId, from, to, ms), burst(x, y, color, n), lane(id, cls), shake(provider).
@@ -26,17 +39,60 @@ const Scene = forwardRef(function Scene({ providers }, ref) {
     }
   }, []);
 
-  // hangars / lanes / sub labels follow the live provider state
+  // Build one lane + hangar per provider, then keep them in step with the live state.
+  const names = providers.map(p => p.name).join('|');
+  useEffect(() => {
+    const lanes = q('#lanes'), hangars = q('#hangars');
+    if (!lanes || !hangars) return;
+    lanes.textContent = '';
+    hangars.textContent = '';
+    const n = providers.length;
+    const { x, w, hubX, hubY } = HANGAR;
+    // With many providers the hangars would overlap, so shrink them to fit the gap.
+    const gap = n > 1 ? (HANGAR.bottom - HANGAR.top) / (n - 1) : HANGAR.h * 2;
+    const k = Math.min(1, gap / (HANGAR.h + 14));
+    const h = HANGAR.h * k;
+    const el = (tag, attrs, parent, text) => {
+      const e = document.createElementNS(NS, tag);
+      Object.entries(attrs).forEach(([k, v]) => e.setAttribute(k, v));
+      if (text !== undefined) e.textContent = text;
+      parent.appendChild(e);
+      return e;
+    };
+    providers.forEach((p, i) => {
+      const cy = centreY(i, n);          // hangar centre
+      const top = cy - h / 2;
+      const mid = x + w / 2;
+      // lanes fan out from the hub so they stay distinguishable
+      const startY = hubY + (i - (n - 1) / 2) * 20;
+      el('path', { id: laneId(p.name), class: 'lane', style: `--pc:${provColor(p.name, providers)}`,
+                   d: `M${hubX} ${startY} C${hubX + 84} ${startY} ${x - 100} ${cy} ${x} ${cy}` }, lanes);
+
+      const g = el('g', { class: 'hangar live', id: hangarId(p.name),
+                          style: `--pc:${provColor(p.name, providers)}` }, hangars);
+      const smoke = el('g', { class: 'smoke' }, g);
+      [[mid - 25, 5], [mid - 5, 6], [mid + 15, 7]].forEach(([sx, r]) =>
+        el('circle', { cx: sx, cy: top - 4, r: r * k }, smoke));
+      el('path', { class: 'body',
+                   d: `M${x} ${top + h} V${top + 26 * k} Q${x} ${top} ${mid} ${top} Q${x + w} ${top} ${x + w} ${top + 26 * k} V${top + h} Z` }, g);
+      el('rect', { class: 'haz', x, y: top + 64 * k, width: w, height: 18 * k, fill: 'url(#hz)' }, g);
+      el('text', { class: 'lbl', x: mid, y: top + 40 * k, 'text-anchor': 'middle',
+                   style: `font-size:${(13 * k).toFixed(1)}px` }, g, p.name.toUpperCase());
+      el('text', { class: 'sub', id: hangarId(p.name) + '-sub', x: mid, y: top + 58 * k, 'text-anchor': 'middle',
+                   style: `font-size:${(9.5 * k).toFixed(1)}px` }, g, '');
+      el('text', { class: 'stamp', x: mid, y: top + 106 * k, 'text-anchor': 'middle' }, g, 'GROUNDED');
+    });
+  }, [names]);
+
+  // live state: fuel, faults, grounded stamps
   useEffect(() => {
     providers.forEach(p => {
-      const L = LET[p.name];
-      if (!L) return;
       const down = p.fault === 'down' || p.fault === 'limit' || p.breaker === 'open';
-      const h = q('#h' + L);
+      const h = q('#' + hangarId(p.name));
       h?.classList.toggle('down', down);
       h?.classList.toggle('live', !down);
-      q('#lane' + L)?.classList.toggle('bad', down);
-      const sub = q(L === 'G' ? '#gSub' : '#qSub');
+      q('#' + laneId(p.name))?.classList.toggle('bad', down);
+      const sub = q('#' + hangarId(p.name) + '-sub');
       if (sub) {
         sub.textContent = down
           ? p.fault === 'limit' ? '429 · RESTING' : 'DOWN · TRIES FAILING'
@@ -96,15 +152,16 @@ const Scene = forwardRef(function Scene({ providers }, ref) {
       return p.getPointAtLength(p.getTotalLength() * f);
     },
     lane(id, cls) {
-      ['laneA', 'laneG', 'laneQ'].forEach(x => {
-        if (!id || x === id) q('#' + x)?.classList.remove('act');
+      root.current?.querySelectorAll('.lane').forEach(el => {
+        if (!id || el.id === id) el.classList.remove('act');
       });
       if (id && cls) q('#' + id)?.classList.add(cls);
     },
+    hasLane(id) { return Boolean(q('#' + id)); },
     laneBad(id, on) { q('#' + id)?.classList.toggle('bad', on); },
     laneRemove(id, cls) { q('#' + id)?.classList.remove(cls); },
     shake(provider) {
-      const h = q('#h' + LET[provider]);
+      const h = q('#' + hangarId(provider));
       if (!h) return;
       h.classList.remove('shake');
       void h.getBoundingClientRect();

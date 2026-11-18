@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Terminal from '../components/Terminal.jsx';
 import { useGateway } from '../lib/GatewayContext.jsx';
+import { provColor } from '../lib/providers.js';
 
 const FAULTS = [['BREAK', 'down', 'dn'], ['SLOW', 'slow', ''], ['LIMIT', 'limit', ''], ['FIX', 'none', '']];
 const HELP = {
@@ -10,10 +11,12 @@ const HELP = {
   limit: 'Provider says 429, so the gateway rests it and sends traffic elsewhere.',
 };
 const MISSIONS = [
-  { id: 'out', ic: '✕', col: 'var(--bad)', t: 'GEMINI OUTAGE', d: 'Gemini goes down. Watch flights reroute.', f: { gemini: 'down', groq: 'none' } },
-  { id: 'storm', ic: '429', col: 'var(--warn)', t: 'RATE LIMIT STORM', d: 'Gemini says too many requests and rests.', f: { gemini: 'limit', groq: 'none' } },
-  { id: 'slow', ic: '◔', col: 'var(--acc)', t: 'EVERYONE IS SLOW', d: 'Both slow. Which one wins?', f: { gemini: 'slow', groq: 'slow' } },
-  { id: 'black', ic: '■', col: 'var(--mut)', t: 'TOTAL BLACKOUT', d: 'Both down. See the honest error.', f: { gemini: 'down', groq: 'down' } },
+  // `first` is the fault set on the highest-priority provider, `rest` on all the others,
+  // so these missions keep working whatever providers are configured.
+  { id: 'out', ic: '✕', col: 'var(--bad)', t: 'FIRST CHOICE OUT', d: 'The first provider goes down. Watch flights reroute.', first: 'down', rest: 'none' },
+  { id: 'storm', ic: '429', col: 'var(--warn)', t: 'RATE LIMIT STORM', d: 'The first provider says too many requests and rests.', first: 'limit', rest: 'none' },
+  { id: 'slow', ic: '◔', col: 'var(--acc)', t: 'EVERYONE IS SLOW', d: 'All slow. Which one wins?', first: 'slow', rest: 'slow' },
+  { id: 'black', ic: '■', col: 'var(--mut)', t: 'TOTAL BLACKOUT', d: 'All down. See the honest error.', first: 'down', rest: 'down' },
 ];
 const clock = () => new Date().toTimeString().slice(0, 8);
 
@@ -25,19 +28,32 @@ function Node({ i, small, big, sub, color, border }) {
   );
 }
 
-function Chain({ last }) {
-  const g = last.tried.find(t => t.provider === 'gemini');
-  const q = last.tried.find(t => t.provider === 'groq');
-  const sub = (t, ok, bad, none) => (t ? (t.ok ? ok : bad) : none);
+function Chain({ last, providers = [] }) {
+  // One node per configured provider, in the order the router would try them.
+  const names = providers.length ? providers.map(p => p.name) : last.tried.map(t => t.provider);
+  const answered = last.tried.find(t => t.ok);
   return (
     <div className="chain">
       <Node i={0} small="1 · KEY" big="CLEARED ✓" sub="key allowed" color="var(--acc)" />
       <span className="arw">→</span>
       <Node i={1} small="2 · MEMORY" big={last.cache ? 'HIT' : 'MISS'} sub={last.cache ? 'answered from memory' : 'no saved answer'} color="var(--tx)" />
-      <span className="arw">→</span>
-      <Node i={2} small="3 · GEMINI" big={g ? (g.ok ? 'LANDED ✓' : 'SKIPPED') : 'NOT NEEDED'} sub={sub(g, `${last.ms} ms`, 'breaker open · 28 s', last.cache ? 'cache answered' : 'groq went first')} color={g && !g.ok ? 'var(--bad)' : 'var(--gem)'} border={g && !g.ok ? 'var(--bad)' : g?.ok ? 'var(--gem)' : ''} />
-      <span className="arw">→</span>
-      <Node i={3} small="4 · GROQ" big={q ? (q.ok ? 'LANDED ✓' : 'FAILED') : 'NOT NEEDED'} sub={sub(q, `${last.ms} ms`, 'also down', 'gemini answered')} color={q && !q.ok ? 'var(--bad)' : 'var(--grq)'} border={q && !q.ok ? 'var(--bad)' : q?.ok ? 'var(--grq)' : ''} />
+      {names.map((name, k) => {
+        const t = last.tried.find(x => x.provider === name);
+        const col = provColor(name, providers);
+        const sub = t
+          ? (t.ok ? `${last.ms} ms` : 'skipped · breaker open')
+          : last.cache ? 'cache answered'
+          : answered ? `${answered.provider} answered` : 'not needed';
+        return (
+          <React.Fragment key={name}>
+            <span className="arw">→</span>
+            <Node i={k + 2} small={`${k + 3} · ${name.toUpperCase()}`}
+              big={t ? (t.ok ? 'LANDED ✓' : 'FAILED') : 'NOT NEEDED'} sub={sub}
+              color={t && !t.ok ? 'var(--bad)' : col}
+              border={t && !t.ok ? 'var(--bad)' : t?.ok ? col : ''} />
+          </React.Fragment>
+        );
+      })}
     </div>
   );
 }
@@ -47,7 +63,7 @@ export default function Simulator() {
   const term = useRef(null);
   const [n, setN] = useState(20);
   const [running, setRunning] = useState(false);
-  const [res, setRes] = useState({ landed: 0, rerouted: 0, lost: 0, gemini: 0, groq: 0, sum: 0 });
+  const [res, setRes] = useState({ landed: 0, rerouted: 0, lost: 0, byProvider: {}, sum: 0 });
 
   useEffect(() => { term.current?.log('simulator ready · break something, then launch flights', ''); }, []);
 
@@ -56,14 +72,13 @@ export default function Simulator() {
     term.current?.log(`${clock()}  ${name}: fault set to ${f}${err ? '  (' + err + ')' : ''}`, err ? 'er' : f === 'none' ? 'ok' : 'wn');
   };
   const mission = async m => {
-    await gw.setFault('gemini', m.f.gemini);
-    await gw.setFault('groq', m.f.groq);
+    for (const [i, p] of gw.providers.entries()) await gw.setFault(p.name, i === 0 ? m.first : m.rest);
     term.current?.log(`${clock()}  mission: ${m.t.toLowerCase()}`, 'ac');
   };
   const launch = async () => {
     if (running) return;
     setRunning(true);
-    setRes({ landed: 0, rerouted: 0, lost: 0, gemini: 0, groq: 0, sum: 0 });
+    setRes({ landed: 0, rerouted: 0, lost: 0, byProvider: {}, sum: 0 });
     term.current?.log(`${clock()}  launching ${n} flights…`, 'ac');
     const out = await gw.launch(n, s => {
       setRes(s);
@@ -98,13 +113,12 @@ export default function Simulator() {
       <div className="g2" style={{ gridTemplateColumns: '1fr 310px', alignItems: 'start' }}>
         <div className="g2" style={{ alignContent: 'start' }}>
           <div className="g2" style={{ gridTemplateColumns: '1fr 1fr' }}>
-            {consoleCard('gemini', 'var(--gem)')}
-            {consoleCard('groq', 'var(--grq)')}
+            {gw.providers.map(p => consoleCard(p.name, provColor(p.name, gw.providers)))}
           </div>
           <div className="rv"><Terminal ref={term} title="TOWER LOG · SIMULATOR" minHeight={250} max={12} style={{ maxHeight: 330, overflow: 'hidden' }} /></div>
           <div className="card pad rv">
             <div className="ttl"><span>LAST FLIGHT · STEP BY STEP</span></div>
-            <Chain key={JSON.stringify(gw.last)} last={gw.last} />
+            <Chain key={JSON.stringify(gw.last)} last={gw.last} providers={gw.providers} />
           </div>
         </div>
         <div className="g2" style={{ alignContent: 'start' }}>
@@ -127,8 +141,8 @@ export default function Simulator() {
               <div>LOST<b style={{ color: 'var(--bad)' }}>{res.lost}</b></div>
               <div>AVG SPEED<b>{res.landed ? Math.round(res.sum / res.landed).toLocaleString() + 'ms' : '-'}</b></div>
             </div>
-            <div className="splitbar"><i style={{ width: `${(100 * res.gemini) / n}%`, background: 'var(--gem)' }} /><i style={{ width: `${(100 * res.groq) / n}%`, background: 'var(--grq)' }} /></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', font: '700 9px var(--mono)', color: 'var(--mut)', marginTop: 5, letterSpacing: '.1em' }}><span>GEMINI {res.gemini}</span><span>GROQ {res.groq}</span></div>
+            <div className="splitbar">{gw.providers.map(p => <i key={p.name} style={{ width: `${(100 * ((res.byProvider || {})[p.name] || 0)) / n}%`, background: provColor(p.name, gw.providers) }} />)}</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6, font: '700 9px var(--mono)', color: 'var(--mut)', marginTop: 5, letterSpacing: '.1em' }}>{gw.providers.map(p => <span key={p.name}>{p.name.toUpperCase()} {(res.byProvider || {})[p.name] || 0}</span>)}</div>
           </div>
         </div>
       </div>

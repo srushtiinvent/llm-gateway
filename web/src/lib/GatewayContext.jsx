@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { api, settings } from './api.js';
+import { provCode } from './providers.js';
 
 const Ctx = createContext(null);
 export const useGateway = () => useContext(Ctx);
@@ -11,6 +12,7 @@ const isDown = p => p && (p.fault === 'down' || p.fault === 'limit' || p.breaker
 const DEMO_PROVIDERS = () => [
   { name: 'gemini', fault: 'none', breaker: 'closed', minuteUsed: 3, minuteMax: 10, dayUsed: 52, dayMax: 250, avgMs: 1073, lastError: '', retryIn: 0 },
   { name: 'groq', fault: 'none', breaker: 'closed', minuteUsed: 3, minuteMax: 30, dayUsed: 59, dayMax: 1000, avgMs: 646, lastError: '', retryIn: 0 },
+  { name: 'openrouter', fault: 'none', breaker: 'closed', minuteUsed: 2, minuteMax: 20, dayUsed: 11, dayMax: 50, avgMs: 1420, lastError: '', retryIn: 0 },
 ];
 const DEMO_KEYS = () => [
   { id: 'k1', name: 'example-key-1', prefix: 'gw_0f241c…', perMin: 20, perDay: 500, left: 462, usedPct: 92, lastUsed: '2 min ago', status: 'ACTIVE' },
@@ -205,7 +207,7 @@ export function GatewayProvider({ children }) {
     addBoard({
       p: res.provider,
       s: res.cache ? 'CACHE HIT' : failed.length ? 'REROUTED' : 'CLEARED',
-      c: res.cache ? 'ok' : failed.length ? 'gq' : res.provider === 'gemini' ? 'gm' : 'gq',
+      c: res.cache ? 'ok' : failed.length ? 'gq' : provCode(res.provider),
       n: res.cache ? 'answered from memory' : failed.length ? `tried ${failed.join(', ')} ✕ → ${res.provider} ✓` : 'one clean landing',
       ms: `${res.ms.toLocaleString()} ms`,
       tk: res.cache ? 'saved' : String(Math.round(rnd(60, 240))),
@@ -221,14 +223,14 @@ export function GatewayProvider({ children }) {
 
   // ---- batch of flights (simulator) -----------------------------------------------------------
   const launch = useCallback(async (n, onStep) => {
-    const out = { landed: 0, rerouted: 0, lost: 0, gemini: 0, groq: 0, sum: 0 };
+    const out = { landed: 0, rerouted: 0, lost: 0, byProvider: {}, sum: 0 };
     for (let i = 0; i < n; i++) {
       let line;
       try {
         const r = await demoLaunchOne(provRef.current); // runs in the browser: never spends anyone's free quota
         out.landed++;
         if (r.tried.some(t => !t.ok)) out.rerouted++;
-        if (r.provider === 'gemini') out.gemini++; else out.groq++;
+        out.byProvider[r.provider] = (out.byProvider[r.provider] || 0) + 1;
         out.sum += r.ms;
         line = { cls: r.tried.some(t => !t.ok) ? 'ac' : 'ok', text: `#${String(i + 1).padStart(2, '0')}  ${r.provider}  ${r.ms}ms${r.tried.some(t => !t.ok) ? '  rerouted' : ''}` };
       } catch (e) {

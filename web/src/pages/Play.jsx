@@ -1,15 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
-import Scene from '../components/Scene.jsx';
+import Scene, { laneId } from '../components/Scene.jsx';
 import Terminal from '../components/Terminal.jsx';
 import { useGateway } from '../lib/GatewayContext.jsx';
 import { countTo, sleep } from '../lib/fx.js';
+import { provColor, provSlot } from '../lib/providers.js';
 
-const LANE = { gemini: '#laneG', groq: '#laneQ' };
-const LANEID = { gemini: 'laneG', groq: 'laneQ' };
+const LANE = name => '#' + laneId(name);
+const LANEID = name => laneId(name);
 const NAME = { gemini: 'GEMINI', groq: 'GROQ' };
 const clock = () => new Date().toTimeString().slice(0, 8);
 
-function ProviderCard({ p, onBreak, onFix }) {
+function ProviderCard({ p, all, onBreak, onFix }) {
   const down = p.fault === 'down' || p.fault === 'limit' || p.breaker === 'open';
   const label = p.fault === 'limit' ? 'RATE LIMITED' : down ? 'GROUNDED' : p.fault === 'slow' ? 'SLOW' : 'CLEARED';
   const fuel = (t, used, max, warnBelow) => {
@@ -24,7 +25,7 @@ function ProviderCard({ p, onBreak, onFix }) {
   };
   return (
     <div className="rv rvw">
-    <div id={p.name === 'gemini' ? 'pG' : 'pQ'} className={`card pv ${down ? 'down' : ''}`}>
+    <div data-prov={provSlot(p.name, all)} style={{ '--pc': provColor(p.name, all) }} className={`card pv ${down ? 'down' : ''}`}>
       <div className="hd"><span className="lamp" /><b className="n">{NAME[p.name] || p.name.toUpperCase()}</b><span className="st">{label}</span></div>
       {p.own ? (
         <div className="mut" style={{ font: '700 10px/1.6 var(--mono)', letterSpacing: '.08em', padding: '10px 0 6px' }}>USING YOUR OWN KEY · YOUR PROVIDER ACCOUNT SETS THE LIMITS</div>
@@ -67,17 +68,17 @@ export default function Play() {
   }, [gw.stats]);
 
   const bounce = async (name, f) => {
-    const lane = LANE[name];
-    if (!lane) return;
-    scene.current.lane(LANEID[name], 'act');
+    const lane = LANE(name);
+    if (!scene.current?.hasLane(LANEID(name))) return;
+    scene.current.lane(LANEID(name), 'act');
     await scene.current.fly(lane, 0, 0.62, 650);
     const pt = scene.current.point(lane, 0.62);
     scene.current.burst(pt.x, pt.y, 'var(--bad)', 12);
     scene.current.shake(name);
     await sleep(220);
     await scene.current.fly(lane, 0.62, 0, 420);
-    scene.current.laneRemove(LANEID[name], 'act');
-    scene.current.laneBad(LANEID[name], true);
+    scene.current.laneRemove(LANEID(name), 'act');
+    scene.current.laneBad(LANEID(name), true);
   };
 
   const takeoff = async e => {
@@ -111,11 +112,11 @@ export default function Play() {
 
     let landed = false;
     for (const t of r.tried) {
-      if (!LANE[t.provider]) continue;
+      if (!S.hasLane(LANEID(t.provider))) continue;   // provider not drawn in the scene
       if (!t.ok) { await bounce(t.provider); continue; }
-      const lane = LANE[t.provider];
-      S.laneBad(LANEID[t.provider], false);
-      S.lane(LANEID[t.provider], 'act');
+      const lane = LANE(t.provider);
+      S.laneBad(LANEID(t.provider), false);
+      S.lane(LANEID(t.provider), 'act');
       await S.fly(lane, 0, 1, gw.providers.find(p => p.name === t.provider)?.fault === 'slow' ? 1700 : 800);
       const end = S.point(lane, 1);
       S.burst(end.x, end.y);
@@ -199,7 +200,7 @@ export default function Play() {
 
         <aside className="side">
           {gw.providers.map(p => (
-            <ProviderCard key={p.name} p={p} onBreak={() => gw.setFault(p.name, 'down')} onFix={() => gw.setFault(p.name, 'none')} />
+            <ProviderCard key={p.name} p={p} all={gw.providers} onBreak={() => gw.setFault(p.name, 'down')} onFix={() => gw.setFault(p.name, 'none')} />
           ))}
           <div className="card pv rv">
             <div className="hd"><span className="lamp" style={{ background: 'var(--acc)', boxShadow: '0 0 8px var(--glow)' }} /><b className="n">{gw.usingOwn ? 'YOUR OWN KEYS' : 'YOUR KEY'}</b><span className="st">{gw.usingOwn ? 'CONNECTED' : `${gw.usage.dayLeft} LEFT TODAY`}</span></div>

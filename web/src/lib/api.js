@@ -1,3 +1,4 @@
+import { provCode } from './providers.js';
 // ---------------------------------------------------------------------------
 // Talks to the Go gateway. Everything that touches the network lives here, so if
 // a JSON field name differs from what the backend really returns, this is the
@@ -138,7 +139,7 @@ export function normFlights(json) {
       t: Number.isNaN(d.getTime()) ? '--:--:--' : d.toTimeString().slice(0, 8),
       p: provider,
       s: failed ? 'GROUNDED' : cache ? 'CACHE HIT' : rerouted ? 'REROUTED' : 'CLEARED',
-      c: failed ? 'bd' : cache ? 'ok' : rerouted ? 'gq' : provider === 'gemini' ? 'gm' : 'gq',
+      c: failed ? 'bd' : cache ? 'ok' : rerouted ? 'gq' : provCode(provider),
       n: failed ? 'no provider could answer' : cache ? 'answered from memory' : rerouted ? `tried ${bad.join(', ')} ✕ → ${provider} ✓` : 'one clean landing',
       ms: cache ? '0 ms' : `${ms.toLocaleString()} ms`,
       tk: '-',

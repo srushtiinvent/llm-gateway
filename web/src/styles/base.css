@@ -2,7 +2,7 @@
 :root{
   --bg:#050607;--panel:#101216;--panel2:#171A20;--line:#2A2F38;--tx:#EEF1F4;--mut:#8A94A3;
   --acc:#E8588F;--on-acc:#FFFFFF;--bad:#FF5A4D;--warn:#FFD23F;--glow:rgba(232,88,143,.20);
-  --gem:#5BA8FF;--grq:#3DD9C4;
+  --gem:#5BA8FF;--grq:#3DD9C4;--opr:#C08BFF;--cer:#FFB454;--mst:#FF7E9D;--ovf:#9AA6B2;
   --sky-a:1;--day-a:0;--sh:rgba(0,0,0,.55);
   --mono:ui-monospace,"SF Mono",Menlo,"DejaVu Sans Mono",monospace;
   --sans:Inter,"SF Pro Display","Helvetica Neue",Arial,sans-serif;
@@ -10,7 +10,7 @@
 [data-theme="light"]{
   --bg:#EDF6F0;--panel:#FFFFFF;--panel2:#E3EFE8;--line:#B7CDC1;--tx:#10302F;--mut:#5C7A74;
   --acc:#D6277F;--on-acc:#FFFFFF;--bad:#E5382A;--warn:#E8A100;--glow:rgba(214,39,127,.26);
-  --gem:#2F6FE0;--grq:#0E9E91;
+  --gem:#2F6FE0;--grq:#0E9E91;--opr:#7B3FD4;--cer:#B4620A;--mst:#C8325C;--ovf:#5C6B78;
   --sky-a:0;--day-a:1;--sh:rgba(16,48,47,.25);
 }
 *{box-sizing:border-box;margin:0}
@@ -133,14 +133,13 @@ main{display:grid;grid-template-columns:1fr 292px;gap:16px}
 .hint{position:absolute;right:16px;bottom:12px;font:700 10px var(--mono);letter-spacing:.12em;color:var(--mut)}
 
 /* provider colours */
-#hG.live .body{stroke:var(--gem)}#hQ.live .body{stroke:var(--grq)}
-#laneG:not(.bad){stroke:var(--gem)}#laneQ:not(.bad){stroke:var(--grq)}
-#pG .tank i{background:var(--gem);box-shadow:0 0 10px color-mix(in srgb,var(--gem) 35%,transparent)}
-#pQ .tank i{background:var(--grq);box-shadow:0 0 10px color-mix(in srgb,var(--grq) 35%,transparent)}
-#pG .tank i.low,#pQ .tank i.low{background:var(--warn);box-shadow:none}
-#pG:not(.down) .lamp{background:var(--gem);box-shadow:0 0 10px var(--gem)}#pQ:not(.down) .lamp{background:var(--grq);box-shadow:0 0 10px var(--grq)}
-#pG:not(.down) .st{color:var(--gem)}#pQ:not(.down) .st{color:var(--grq)}
-.hangar#hG .lbl{fill:var(--gem)}.hangar#hQ .lbl{fill:var(--grq)}
+.hangar.live .body{stroke:var(--pc,var(--acc))}
+.lane:not(.bad){stroke:var(--pc,var(--mut))}
+[data-prov] .tank i{background:var(--pc);box-shadow:0 0 10px color-mix(in srgb,var(--pc) 35%,transparent)}
+[data-prov] .tank i.low{background:var(--warn);box-shadow:none}
+[data-prov]:not(.down) .lamp{background:var(--pc);box-shadow:0 0 10px var(--pc)}
+[data-prov]:not(.down) .st{color:var(--pc)}
+.hangar .lbl{fill:var(--pc,var(--tx))}
 .plane{filter:drop-shadow(0 0 6px var(--glow))}
 /* entrance */
 .rv{opacity:0}

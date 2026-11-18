@@ -2,12 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useGateway } from '../lib/GatewayContext.jsx';
 import { countTo } from '../lib/fx.js';
 import { settings } from '../lib/api.js';
+import { provSlot } from '../lib/providers.js';
 
 const WINDOWS = [['1h', 'LAST HOUR', '1H'], ['6h', 'LAST 6 HOURS', '6H'], ['24h', 'LAST 24 HOURS', '24H'], ['7d', 'LAST 7 DAYS', '7D']];
 
-function ProviderPanel({ p }) {
+function ProviderPanel({ p, all }) {
   const down = p.fault === 'down' || p.fault === 'limit' || p.breaker === 'open';
-  const col = p.name === 'gemini' ? 'gem' : 'grq';
+  const col = provSlot(p.name, all);
   const c = `var(--${down ? 'bad' : col})`;
   const tank = (l, used, max, warn) => {
     const left = Math.max(0, max - used);
@@ -82,7 +83,7 @@ export default function RadarPage() {
   return (
     <section className="page on" id="pg-radar">
       <div className="g2 radar-top" style={{ gridTemplateColumns: `repeat(${Math.max(1, gw.providers.length)}, minmax(0, 1fr)) 290px` }}>
-        {gw.providers.map(p => <ProviderPanel key={p.name} p={p} />)}
+        {gw.providers.map(p => <ProviderPanel key={p.name} p={p} all={gw.providers} />)}
         <div className="card pad rv" style={{ textAlign: 'center' }}>
           <div className="ttl"><span>YOUR FLIGHTS LEFT</span></div>
           <div style={{ position: 'relative', width: 150, margin: '0 auto' }}>
@@ -129,7 +130,7 @@ export default function RadarPage() {
           {gw.board.map((r, i) => (
             <div key={r.t + i + r.p} className={`rowt ${i === 0 ? 'flash' : ''}`} style={{ gridTemplateColumns: '80px 90px 120px 1fr 90px 90px' }}>
               <span className="mut">{r.t}</span>
-              <span style={{ color: `var(--${r.p === 'gemini' ? 'gem' : 'grq'})` }}>{r.p}</span>
+              <span style={{ color: `var(--${provSlot(r.p, gw.providers)})` }}>{r.p}</span>
               <span><span className={`chip ${r.c}`}>{r.s}</span></span>
               <span className="mut">{r.n}</span>
               <span>{r.ms}</span>
